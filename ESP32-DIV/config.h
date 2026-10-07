@@ -183,15 +183,15 @@ namespace Deauther {
   void deautherLoop();
 }
 namespace Tetris {
-  // Entry/exit points for the LEFT+SELECT chord overlay (see ESP32-DIV.ino,
-  // maintainTetrisChord()). tetrisEnter() repaints from the persisted game
-  // state (or starts a new game if none is in progress / after game over --
-  // it never resets an in-progress game). tetrisLeave() best-effort redraws
-  // whatever plain menu/submenu was frozen underneath; it is a no-op for a
-  // live feature screen, see Tetris.cpp.
+  // Easter egg launched from inside Settings (AppSettingsUI::loop(), see
+  // utils.cpp) via the sequence UP, UP, DOWN, SELECT. tetrisEnter() repaints
+  // from the persisted game state (or starts a new game if none is in
+  // progress / after game over -- it never resets an in-progress game).
+  // tetrisLoop() returns true once the player holds LEFT long enough to
+  // request exit; the caller (AppSettingsUI::loop()) then redraws Settings
+  // itself, since it's the one place this is reachable from.
   void tetrisEnter();
-  void tetrisLoop();
-  void tetrisLeave();
+  bool tetrisLoop();
 }
 namespace ProbeRequestFlood {
   void probeRequestFloodSetup();

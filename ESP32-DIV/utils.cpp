@@ -2641,6 +2641,43 @@ void loop(){
     return;
   }
 
+  // ================= Easter egg: UP, UP, DOWN, SELECT =================
+  // Launches Tetris. Checked only in the plain navigation view (the three
+  // sub-modes above already returned) so it can't interfere with editing a
+  // setting or a dialog's own use of these same buttons. A wrong press (or
+  // LEFT/RIGHT) just resets the sequence -- it doesn't block normal
+  // navigation, which still happens below on the very same presses.
+  static int tetrisSeqStep = 0;
+  static uint32_t tetrisSeqLastMs = 0;
+  constexpr uint32_t TETRIS_SEQ_TIMEOUT_MS = 2000;
+  if (tetrisSeqStep != 0 && now - tetrisSeqLastMs > TETRIS_SEQ_TIMEOUT_MS) {
+    tetrisSeqStep = 0;
+  }
+  if (upNow && !upWasDown) {
+    tetrisSeqStep = (tetrisSeqStep == 0 || tetrisSeqStep == 1) ? tetrisSeqStep + 1 : 1;
+    tetrisSeqLastMs = now;
+  } else if (downNow && !downWasDown) {
+    tetrisSeqStep = (tetrisSeqStep == 2) ? 3 : 0;
+    tetrisSeqLastMs = now;
+  } else if (selectNow && !selectWasDown) {
+    if (tetrisSeqStep == 3) {
+      tetrisSeqStep = 0;
+      upWasDown = upNow; downWasDown = downNow; leftWasDown = leftNow;
+      rightWasDown = rightNow; selectWasDown = selectNow;
+      Tetris::tetrisEnter();
+      bool exitTetris = false;
+      while (!exitTetris) {
+        exitTetris = Tetris::tetrisLoop();
+        delay(1);
+      }
+      drawAll();   // our own screen was frozen underneath, state untouched
+      return;
+    }
+    tetrisSeqStep = 0;
+  } else if ((leftNow && !leftWasDown) || (rightNow && !rightWasDown)) {
+    tetrisSeqStep = 0;
+  }
+
   // ================= Modo NAVEGACAO =================
   if (upNow && !upWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS))   { sel=(sel+N-1)%N; changedByButtons=true; lastNavMs = now; }
   if (downNow && !downWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)){ sel=(sel+1)%N;   changedByButtons=true; lastNavMs = now; }

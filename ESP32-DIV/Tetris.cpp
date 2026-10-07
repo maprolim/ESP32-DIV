@@ -1,12 +1,16 @@
-// Tetris overlay game.
+// Tetris easter egg.
 //
-// Entered/left only through the global LEFT+SELECT chord handled centrally in
-// ESP32-DIV.ino (maintainTetrisChord()) -- there is no menu entry and no
-// touch nav footer for this feature (see HANDOFF-style project notes: the
-// whole point is that it can interrupt any other screen). Game state lives
-// in file-scope statics and is never reset on tetrisEnter() unless no game
-// is in progress yet (or the last one ended in game over), so chording away
-// and back preserves the board exactly.
+// Entered only from inside Settings (AppSettingsUI::loop(), utils.cpp) via
+// the sequence UP, UP, DOWN, SELECT -- there is no menu entry and no touch
+// nav footer for this feature. Left by the SAME sequence while playing
+// (symmetric toggle). Deliberately tap-only, no held buttons anywhere: an
+// earlier hold-based design turned out to be unreliable on this hardware
+// (holding a direction button blocks inside the project's own
+// waitButtonReleased() helper in several screens), so every gesture here is
+// plain discrete presses. Game state lives in file-scope statics and is
+// never reset on tetrisEnter() unless no game is in progress yet (or the
+// last one ended in game over), so leaving and coming back preserves the
+// board exactly.
 #include "config.h"
 #include "shared.h"
 #include "utils.h"
@@ -15,9 +19,16 @@ namespace Tetris {
 
 static constexpr int kCols = 10;
 static constexpr int kRows = 20;
-static constexpr int kCellPx = 14;
-static constexpr int kBoardX = (TFT_WIDTH - kCols * kCellPx) / 2;   // 50
-static constexpr int kBoardY = 32;                                  // below the shared status bar + our own score line
+static constexpr int kCellPx = 13;
+static constexpr int kBoardX = (TFT_WIDTH - kCols * kCellPx) / 2;   // 55
+// Shared status bar occupies y=0..19 (see drawStatusBar()/the y=19 divider
+// line every other feature draws). Give our own score line generous room
+// below it instead of butting right up against it (kStatusLineY/-H below),
+// and keep the whole board + exit hint comfortably inside TFT_HEIGHT=320 --
+// an earlier, tighter layout clipped the hint text off the bottom edge.
+static constexpr int kStatusLineY = 22;
+static constexpr int kStatusLineH = 14;
+static constexpr int kBoardY = 38;                                  // kStatusLineY + kStatusLineH + 2px gap
 
 // Index 0 is "empty" and unused for drawing; 1..7 map to the 7 tetrominoes.
 static const uint16_t kPieceColors[8] = {
@@ -94,6 +105,35 @@ static int level = 1;
 static uint32_t dropIntervalMs = 800;
 static uint32_t lastDropMs = 0;
 static uint32_t s_lastDrawnScore = 0xFFFFFFFFu;
+
+// Exit sequence (UP, UP, DOWN, SELECT -- same as the Settings entry gesture,
+// checked here against Tetris's own button edges). A stray LEFT/RIGHT tap,
+// or any out-of-order press, resets it; it never blocks normal movement.
+static int s_exitSeqStep = 0;
+static uint32_t s_exitSeqLastMs = 0;
+static constexpr uint32_t kExitSeqTimeoutMs = 1500;
+
+// Returns true exactly when this tick's SELECT edge completes the sequence.
+static bool maintainExitSequence(bool upEdge, bool downEdge, bool selectEdge,
+                                  bool leftEdge, bool rightEdge, uint32_t now) {
+  if (s_exitSeqStep != 0 && now - s_exitSeqLastMs > kExitSeqTimeoutMs) {
+    s_exitSeqStep = 0;
+  }
+  if (upEdge) {
+    s_exitSeqStep = (s_exitSeqStep == 0 || s_exitSeqStep == 1) ? s_exitSeqStep + 1 : 1;
+    s_exitSeqLastMs = now;
+  } else if (downEdge) {
+    s_exitSeqStep = (s_exitSeqStep == 2) ? 3 : 0;
+    s_exitSeqLastMs = now;
+  } else if (selectEdge) {
+    const bool done = (s_exitSeqStep == 3);
+    s_exitSeqStep = 0;
+    return done;
+  } else if (leftEdge || rightEdge) {
+    s_exitSeqStep = 0;
+  }
+  return false;
+}
 
 static int randomPieceType() {
   return (int)random(7);
@@ -256,15 +296,15 @@ static void redrawDirtyCells(bool forceAll) {
 }
 
 static void drawScoreLine() {
-  tft.fillRect(0, 20, TFT_WIDTH, 12, FEATURE_BG);
+  tft.fillRect(0, kStatusLineY - 1, TFT_WIDTH, kStatusLineH, FEATURE_BG);
   tft.setTextSize(1);
   tft.setTextColor(ORANGE, FEATURE_BG);
-  tft.setCursor(10, 21);
+  tft.setCursor(10, kStatusLineY);
   tft.print("TETRIS");
 
   const String s = "Score: " + String(score);
   const int w = tft.textWidth(s);
-  tft.setCursor(TFT_WIDTH - 10 - w, 21);
+  tft.setCursor(TFT_WIDTH - 10 - w, kStatusLineY);
   tft.print(s);
 }
 
@@ -287,21 +327,30 @@ static void drawGameOver() {
   tft.print("to restart");
 }
 
+static void drawExitHint() {
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.setCursor(6, kBoardY + kRows * kCellPx + 2);
+  tft.print("Exit: UP,UP,DOWN,SELECT");
+}
+
 void tetrisEnter() {
-  // Disable the touch-nav merge while Tetris owns the screen: the frozen
-  // feature underneath may have left it enabled, and its footer zone
-  // overlaps the bottom rows of our own board.
+  // Disable the touch-nav merge while Tetris owns the screen: whatever was
+  // on screen before Settings may have left it enabled, and its footer zone
+  // would overlap the bottom rows of our own board.
   setTouchButtonInputEnabled(false);
 
   featureClearContent(TFT_BLACK);
   drawStatusBar(readBatteryVoltage(), true);
   tft.drawFastHLine(0, 19, TFT_WIDTH, UI_LINE);
   tft.drawRect(kBoardX - 1, kBoardY - 1, kCols * kCellPx + 2, kRows * kCellPx + 2, UI_LINE);
+  drawExitHint();
 
   if (!gameStarted) {
     startNewGame();
   }
   lastDropMs = millis();   // don't let time spent away from Tetris cause an instant drop
+  s_exitSeqStep = 0;
 
   s_lastDrawnScore = 0xFFFFFFFFu;   // force the score line to redraw
   drawScoreLine();
@@ -311,38 +360,47 @@ void tetrisEnter() {
   }
 }
 
-void tetrisLoop() {
+bool tetrisLoop() {
+  const uint32_t now = millis();
+  const bool leftEdge   = isButtonPressedEdge(BTN_LEFT);
+  const bool rightEdge  = isButtonPressedEdge(BTN_RIGHT);
+  const bool upEdge     = isButtonPressedEdge(BTN_UP);
+  const bool downEdge   = isButtonPressedEdge(BTN_DOWN);
+  const bool selectEdge = isButtonPressedEdge(BTN_SELECT);
+  const bool downHeld   = isButtonPressed(BTN_DOWN);
+
+  // UP, UP, DOWN, SELECT again (same as the Settings entry gesture) exits
+  // back to Settings. Checked before anything below reacts to the same
+  // presses, so the completing SELECT tap doesn't also hard-drop.
+  if (maintainExitSequence(upEdge, downEdge, selectEdge, leftEdge, rightEdge, now)) {
+    return true;
+  }
+
   if (gameOver) {
-    if (isButtonPressedEdge(BTN_SELECT)) {
+    if (selectEdge) {
       startNewGame();
       s_lastDrawnScore = 0xFFFFFFFFu;
       drawScoreLine();
       redrawDirtyCells(true);
     }
-    return;
+    return false;
   }
 
-  // LEFT/RIGHT move one column per press, no auto-repeat: holding LEFT is
-  // also how the user sets up the exit chord, and continuous movement while
-  // held would make that feel like the piece is "running away."
-  if (isButtonPressedEdge(BTN_LEFT)) {
+  // LEFT/RIGHT move one column per press, no auto-repeat.
+  if (leftEdge) {
     tryMove(-1);
   }
-  if (isButtonPressedEdge(BTN_RIGHT)) {
+  if (rightEdge) {
     tryMove(1);
   }
-  if (isButtonPressedEdge(BTN_UP)) {
+  if (upEdge) {
     tryRotate();
   }
-  // Hard drop only when LEFT is not held -- belt-and-suspenders on top of the
-  // chord mechanism in ESP32-DIV.ino, which already hides the triggering
-  // SELECT press from us entirely.
-  if (isButtonPressedEdge(BTN_SELECT) && !isButtonPressed(BTN_LEFT)) {
+  if (selectEdge) {
     hardDrop();
   }
 
-  const uint32_t now = millis();
-  const uint32_t interval = isButtonPressed(BTN_DOWN) ? 40 : dropIntervalMs;
+  const uint32_t interval = downHeld ? 40 : dropIntervalMs;
   if (now - lastDropMs >= interval) {
     stepDown();
     lastDropMs = now;
@@ -353,24 +411,7 @@ void tetrisLoop() {
   if (gameOver) {
     drawGameOver();
   }
-}
-
-void tetrisLeave() {
-  if (is_main_menu) {
-    menu_initialized = false;
-    last_menu_index = -1;
-    displayMenu();
-  } else if (in_sub_menu) {
-    submenu_initialized = false;
-    last_submenu_index = -1;
-    other_menu_grid_initialized = false;
-    last_other_menu_index = -1;
-    displaySubmenu();   // self-dispatches to the paged/grid submenu variants
-  }
-  // Else: a live feature is active. Its Setup() is deliberately NOT called
-  // here -- that would reset live state (e.g. abort a running attack). The
-  // stale Tetris pixels are a known, documented cosmetic-only limitation;
-  // that feature repaints normally on its own next redraw tick.
+  return false;
 }
 
 }  // namespace Tetris
