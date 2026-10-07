@@ -202,6 +202,10 @@ namespace KarmaAttack {
   void karmaSetup();
   void karmaLoop();
 }
+namespace ChannelGraph {
+  void channelGraphSetup();
+  void channelGraphLoop();
+}
 namespace FirmwareUpdate {
   void updateSetup();
   void updateLoop();

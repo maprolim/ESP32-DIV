@@ -3,6 +3,7 @@
 #include <TFT_eSPI.h>
 #include <Wire.h>
 #include "SettingsStore.h"
+#include "LangInfo.h"
 #include "Touchscreen.h"
 #include "config.h"
 #include "ducky.h"
@@ -12,6 +13,7 @@
 #include "rfid.h"
 #include "shared.h"
 #include "utils.h"
+#include "hwdetect.h"
 
 #if !BOARD_HAS_ESP32S3
 #include "soc/soc.h"
@@ -70,7 +72,7 @@ const char *submenu_items[NUM_SUBMENU_ITEMS] = {
 // WiFi submenu is split across two pages (features after Hidden SSID on page 2).
 // Bottom row: icon | Main Menu                 Next/Prev Page | icon
 static constexpr int WIFI_PAGE0_FEATURES = 8;
-static constexpr int WIFI_PAGE1_FEATURES = 3;
+static constexpr int WIFI_PAGE1_FEATURES = 4;
 static int wifi_submenu_page = 0;
 
 const char *wifi_page0_items[WIFI_PAGE0_FEATURES] = {
@@ -83,10 +85,14 @@ const char *wifi_page0_items[WIFI_PAGE0_FEATURES] = {
     "Captive Portal",
     "Hidden SSID Revealer"};
 
+// Textos informativos (BTN_RIGHT no menu WiFi) -- ver wifi_page0_info em LangInfo.cpp,
+// mesma ordem de wifi_page0_items.
+
 const char *wifi_page1_items[WIFI_PAGE1_FEATURES] = {
     "WPS Scanner",
     "ARP Scanner",
-    "Karma Attack"};
+    "Karma Attack",
+    "Channel Graph"};
 
 // Bluetooth submenu uses the same paged footer layout as WiFi.
 static constexpr int BT_PAGE0_FEATURES = 8;
@@ -102,6 +108,9 @@ const char *bluetooth_page0_items[BT_PAGE0_FEATURES] = {
     "Sniffer",
     "BLE Scanner",
     "BLE Rubber Ducky"};
+
+// Textos informativos (BTN_RIGHT) -- ver bluetooth_page0_info em LangInfo.cpp,
+// mesma ordem de bluetooth_page0_items.
 
 const char *bluetooth_page1_items[BT_PAGE1_FEATURES] = {
     "Skimmer Detect"};
@@ -119,6 +128,9 @@ const char *nrf_submenu_items[nrf_NUM_SUBMENU_ITEMS] = {
     "MouseJack Inject",
     "Back to Main Menu"};
 
+// Textos informativos (BTN_RIGHT) -- ver nrf_info em LangInfo.cpp, mesma
+// ordem de nrf_submenu_items (sem o "Back").
+
 const int subghz_NUM_SUBMENU_ITEMS = 6;
 const char *subghz_submenu_items[subghz_NUM_SUBMENU_ITEMS] = {
     "Replay Attack",
@@ -128,6 +140,9 @@ const char *subghz_submenu_items[subghz_NUM_SUBMENU_ITEMS] = {
     "Saved Profile",
     "Back to Main Menu"};
 
+// Textos informativos (BTN_RIGHT) -- ver subghz_info em LangInfo.cpp, mesma
+// ordem de subghz_submenu_items (sem o "Back").
+
 const int tools_NUM_SUBMENU_ITEMS = 5;
 const char *tools_submenu_items[tools_NUM_SUBMENU_ITEMS] = {
     "Serial Monitor",
@@ -135,6 +150,9 @@ const char *tools_submenu_items[tools_NUM_SUBMENU_ITEMS] = {
     "Touch Calibrate",
     "SD File Manager",
     "Back to Main Menu"};
+
+// Textos informativos (BTN_RIGHT) -- ver tools_info em LangInfo.cpp, mesma
+// ordem de tools_submenu_items (sem o "Back").
 
 static constexpr uint8_t OTHER_LAYER_HOME = 0;
 static constexpr uint8_t OTHER_LAYER_IR   = 1;
@@ -161,18 +179,28 @@ const char *rfid_submenu_items[rfid_NUM_SUBMENU_ITEMS] = {
     "Disrupt Emulate",
     "Back to Main Menu"};
 
+// Textos informativos (BTN_RIGHT) -- ver rfid_info em LangInfo.cpp, mesma
+// ordem de rfid_submenu_items (sem o "Back").
+
 const int gps_NUM_SUBMENU_ITEMS = 3;
 const char *gps_submenu_items[gps_NUM_SUBMENU_ITEMS] = {
     "Wardriver",
     "Satellite Scanner",
     "Back to Main Menu"};
 
-const int ir_NUM_SUBMENU_ITEMS = 4;
+// Textos informativos (BTN_RIGHT) -- ver gps_info em LangInfo.cpp, mesma
+// ordem de gps_submenu_items (sem o "Back").
+
+const int ir_NUM_SUBMENU_ITEMS = 5;
 const char *ir_submenu_items[ir_NUM_SUBMENU_ITEMS] = {
     "Record",
     "Saved Profile",
     "Universal Controller",
+    "Universal Controller A/C",
     "Back to Main Menu"};
+
+// Textos informativos (BTN_RIGHT) -- ver ir_info em LangInfo.cpp, mesma
+// ordem de ir_submenu_items (sem o "Back").
 
 const int about_NUM_SUBMENU_ITEMS = 1;
 const char *about_submenu_items[about_NUM_SUBMENU_ITEMS] = {
@@ -222,7 +250,8 @@ const unsigned char *wifi_page0_icons[WIFI_PAGE0_FEATURES] = {
 const unsigned char *wifi_page1_icons[WIFI_PAGE1_FEATURES] = {
     bitmap_icon_key,
     bitmap_icon_list,
-    bitmap_icon_devil
+    bitmap_icon_devil,
+    bitmap_icon_chart_dot
 };
 
 const unsigned char *bluetooth_page0_icons[BT_PAGE0_FEATURES] = {
@@ -296,6 +325,7 @@ const unsigned char *ir_submenu_icons[ir_NUM_SUBMENU_ITEMS] = {
     bitmap_icon_led,
     bitmap_icon_list,
     bitmap_icon_remote_control,
+    bitmap_icon_temp,
     bitmap_icon_go_back
 };
 
@@ -727,13 +757,63 @@ static bool isTouchNavSlotDown(int idx) {
   return FeatureUI::hit(s_touchNavBtns, 5, x, y) == idx;
 }
 
-bool isPhysicalButtonPressed(int buttonPin) {
+// ---------------------------------------------------------------------------
+// Debounce CENTRAL dos botoes fisicos (PCF8574).
+// O estado "pressionado" so muda depois de permanecer estavel por
+// BTN_DEBOUNCE_MS. Isso elimina de vez o "apertei 1x e o aparelho contou 2x".
+// Toda feature deve usar isButtonPressed / isPhysicalButtonPressed /
+// isButtonPressedEdge (que passam por aqui) e NAO ler o PCF cru.
+// ---------------------------------------------------------------------------
+// Debounce ASSIMETRICO (robusto e responsivo):
+//  - APERTO: aceito na hora, com 1 leitura (responsivo; nao depende da taxa de
+//    polling; botoes nunca "somem").
+//  - SOLTA: so e aceita depois de permanecer solta por BTN_RELEASE_MS continuos.
+//    Como o PCF8574 e lido por I2C disputado com outro core, uma leitura espuria
+//    isolada ("solta" momentanea no meio do toque) e descartada -> acaba o
+//    "apertei 1x e contou 2x" (que era um falso solta+aperta durante o hold).
+static constexpr uint32_t BTN_RELEASE_MS = 40;
+static bool     s_physStable[8]    = {false,false,false,false,false,false,false,false};
+static bool     s_physRelPending[8]= {false,false,false,false,false,false,false,false};
+static uint32_t s_physRelStart[8]  = {0,0,0,0,0,0,0,0};
+static bool     s_physEdgeLast[8]  = {false,false,false,false,false,false,false,false};
+
+// Contadores de diagnostico (lidos na tela do Settings): quantas descidas de
+// borda RAW (leitura crua) e STB (estado debounced) por botao.
+uint16_t g_btnRawDown[8] = {0,0,0,0,0,0,0,0};
+uint16_t g_btnStbDown[8] = {0,0,0,0,0,0,0,0};
+
+static bool physButtonDebounced(int buttonPin) {
 #if HAS_PCF8574_BUTTONS
   if (getPcf8574Address() != 0) {
-    return !pcf.digitalRead(buttonPin);
+    const int idx = buttonPin & 7;
+    const bool rawPressed = !pcf.digitalRead(buttonPin);   // ativo em nivel baixo
+    const uint32_t now = millis();
+    static bool s_rawPrev[8] = {false,false,false,false,false,false,false,false};
+    if (rawPressed != s_rawPrev[idx]) { s_rawPrev[idx] = rawPressed; if (rawPressed) g_btnRawDown[idx]++; }
+    const bool before = s_physStable[idx];
+    if (rawPressed) {
+      s_physRelPending[idx] = false;       // qualquer leitura de aperto cancela a solta
+      s_physStable[idx] = true;            // aperto aceito imediatamente
+    } else if (s_physStable[idx]) {
+      if (!s_physRelPending[idx]) {
+        s_physRelPending[idx] = true;      // candidata a solta: comeca a contar
+        s_physRelStart[idx] = now;
+      } else if ((uint32_t)(now - s_physRelStart[idx]) >= BTN_RELEASE_MS) {
+        s_physStable[idx] = false;         // solta confirmada (persistiu) -> ignora glitch
+        s_physRelPending[idx] = false;
+      }
+    } else {
+      s_physRelPending[idx] = false;
+    }
+    if (s_physStable[idx] != before && s_physStable[idx]) g_btnStbDown[idx]++;
+    return s_physStable[idx];
   }
 #endif
   return false;
+}
+
+bool isPhysicalButtonPressed(int buttonPin) {
+  return physButtonDebounced(buttonPin);
 }
 
 bool isTouchNavButtonPressed(int buttonPin) {
@@ -770,10 +850,10 @@ bool isTouchNavButtonPressedEdge(int buttonPin) {
 bool isButtonPressedEdge(int buttonPin) {
 #if HAS_PCF8574_BUTTONS
   if (getPcf8574Address() != 0) {
-    const int idx = buttonPin % 8;
-    const bool cur = pcf.digitalRead(buttonPin);
-    const bool edge = !cur && s_pcfButtonLastState[idx];
-    s_pcfButtonLastState[idx] = cur;
+    const int idx = buttonPin & 7;
+    const bool stable = physButtonDebounced(buttonPin);       // estado ja debounced
+    const bool edge = stable && !s_physEdgeLast[idx];         // borda de pressionar
+    s_physEdgeLast[idx] = stable;
     if (edge) {
       return true;
     }
@@ -781,6 +861,24 @@ bool isButtonPressedEdge(int buttonPin) {
 #endif
 
   return isTouchNavButtonPressedEdge(buttonPin);
+}
+
+// Consome a soltura REAL do botao (fisico ou touch-nav) antes de deixar a
+// acao seguir adiante. Um toque humano pode durar mais que os ~200ms usados
+// antes como "debounce" aqui pelos handlers de menu, o que fazia o MESMO
+// toque ainda estar "pressionado" na proxima vez que o handler era chamado
+// e ser contado como uma 2a (ou 3a) acao -- ex.: cursor do menu andando
+// varias posicoes, ou o aperto que ABRIU um submenu sendo relido como a
+// primeira opcao dele. O debounce central (physButtonDebounced) ja confirma
+// corretamente 1 borda por toque (medido no aparelho); o bug era aqui, na
+// camada de menu. Identico ao padrao que ja era usado so pro "<" (voltar).
+static const uint32_t BTN_ACTION_RELEASE_MS = 60;
+void waitButtonReleased(int buttonPin) {
+    uint32_t t = millis();
+    while ((uint32_t)(millis() - t) < BTN_ACTION_RELEASE_MS) {
+        if (isButtonPressed(buttonPin)) t = millis();
+        delay(5);
+    }
 }
 
 bool featureExitButtonPressed() {
@@ -1165,24 +1263,133 @@ const uint16_t icon_colors[NUM_MENU_ITEMS] = {
     drawStatusBar(currentBatteryVoltage, true);
 }
 
+// Paragrafo com quebra de linha manual (igual ao printWrappedText, mas devolve
+// o Y final e para de desenhar se passar de maxY, pra nao invadir area vizinha).
+static int drawWrappedParagraph(int x, int y, int maxWidth, int maxY, const char* text) {
+    String msg = text ? String(text) : String("");
+    msg.trim();
+    const int lineH = 13;
+    while (msg.length() > 0 && y <= maxY) {
+        int lineEnd = msg.length();
+        while (lineEnd > 0 && tft.textWidth(msg.substring(0, lineEnd)) > maxWidth) {
+            lineEnd--;
+        }
+        if (lineEnd <= 0) {
+            break;
+        }
+        if (lineEnd < msg.length()) {
+            int lastSpace = msg.substring(0, lineEnd).lastIndexOf(' ');
+            if (lastSpace > 0) {
+                lineEnd = lastSpace;
+            }
+        }
+        tft.setCursor(x, y);
+        tft.print(msg.substring(0, lineEnd));
+        msg = msg.substring(lineEnd);
+        msg.trim();
+        y += lineH;
+    }
+    return y;
+}
+
+// Tela cheia com a info do item de menu selecionado quando o usuario aperta
+// BTN_RIGHT, no idioma escolhido em Settings > Info Language. BTN_LEFT volta
+// pro submenu de onde veio.
+static void drawFeatureInfoScreen(const char* title, const InfoText& info) {
+    tft.fillScreen(UI_BG);
+    currentBatteryVoltage = readBatteryVoltage();
+    drawStatusBar(currentBatteryVoltage, true);
+
+    const uint8_t lang = settings().infoLang;
+    const int xPad = 14;
+    const int maxWidth = tft.width() - 2 * xPad;
+    const int maxY = tft.height() - 12;
+    int y = 32;
+
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextFont(2);
+    tft.setTextColor(UI_ICON, UI_BG);
+    tft.setCursor(xPad, y);
+    tft.print(title);
+    y += 20;
+
+    tft.setTextFont(1);
+    tft.setTextSize(1);
+    tft.setTextColor(UI_DIM_TEXT, UI_BG);
+    tft.setCursor(xPad, y);
+    tft.print("< voltar");
+    y += 12;
+
+    tft.drawFastHLine(xPad - 2, y, tft.width() - 2 * (xPad - 2), UI_LINE);
+    y += 8;
+
+    tft.setTextColor(UI_ICON, UI_BG);
+    tft.setCursor(xPad, y);
+    tft.print(INFO_LANG_NAMES[lang < INFO_LANG_COUNT ? lang : INFO_LANG_EN]);
+    tft.print(":");
+    y += 13;
+    tft.setTextColor(UI_TEXT, UI_BG);
+    drawWrappedParagraph(xPad, y, maxWidth, maxY, infoLangText(info, lang));
+}
+
+static void showFeatureInfoScreen(const char* title, const InfoText& info) {
+    drawFeatureInfoScreen(title, info);
+    while (true) {
+        if (isButtonPressed(BTN_LEFT)) {
+            waitButtonReleased(BTN_LEFT);
+            break;
+        }
+        delay(10);
+    }
+}
+
 void handleWiFiSubmenuButtons() {
+    if (isButtonPressed(BTN_LEFT)) {   // "<" fisico volta ao menu principal
+        waitButtonReleased(BTN_LEFT);  // espera soltar de verdade (evita reler o mesmo toque)
+        in_sub_menu = false;
+        feature_active = false;
+        feature_exit_requested = false;
+        wifi_submenu_page = 0;
+        displayMenu();
+        handleButtons();
+        is_main_menu = false;
+        return;
+    }
+
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         last_interaction_time = millis();
         displaySubmenu();
-        delay(200);
+        waitButtonReleased(BTN_UP);
     }
 
     if (isButtonPressed(BTN_DOWN)) {
         current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
         last_interaction_time = millis();
         displaySubmenu();
-        delay(200);
+        waitButtonReleased(BTN_DOWN);
+    }
+
+    // RIGHT no item selecionado: abre uma tela cheia com a info (EN + PT-BR)
+    // (so nas 8 features da pagina 0, que tem texto cadastrado em wifi_page0_info_*).
+    if (isButtonPressed(BTN_RIGHT)) {
+        waitButtonReleased(BTN_RIGHT);
+        if (wifi_submenu_page == 0 && current_submenu_index < WIFI_PAGE0_FEATURES) {
+            showFeatureInfoScreen(wifi_page0_items[current_submenu_index],
+                                  wifi_page0_info[current_submenu_index]);   // bloqueia ate soltar o BTN_LEFT
+            // A tela de info usou a tela inteira; forcar redraw completo do
+            // submenu (senao displaySubmenu() faz so o update incremental de
+            // sempre e deixa pixels da tela de info parados ate o proximo LEFT).
+            submenu_initialized = false;
+            last_submenu_index = -1;
+            displaySubmenu();
+        }
+        return;
     }
 
     if (isButtonPressed(BTN_SELECT)) {
         last_interaction_time = millis();
-        delay(70);
+        waitButtonReleased(BTN_SELECT);
 
         // Footer: Next / Prev
         if (current_submenu_index == pagedPageBtnIndex()) {
@@ -1212,24 +1419,17 @@ void handleWiFiSubmenuButtons() {
             feature_active = true;
             feature_exit_requested = false;
             PacketMonitor::ptmSetup();
+            // Saida e so do ptmLoop() (fisico LEFT / touch "Exit"), que seta
+            // feature_exit_requested. NAO ter um checkpoint de saida aqui
+            // tambem em cima do SELECT -- SELECT ficou livre nesta tela, e um
+            // checkpoint redundante aqui fazia SELECT sair por engano.
             while (current_submenu_index == 0 && !feature_exit_requested) {
                 current_submenu_index = 0;
                 in_sub_menu = true;
                 PacketMonitor::ptmLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1246,24 +1446,18 @@ void handleWiFiSubmenuButtons() {
             feature_active = true;
             feature_exit_requested = false;
             BeaconSpammer::beaconSpamSetup();
+            // Saida e so do beaconSpamLoop() (fisico LEFT / touch "Exit"), que
+            // seta feature_exit_requested. NAO ter um checkpoint de saida aqui
+            // tambem em cima do SELECT -- SELECT agora e o start/stop do spam,
+            // e um checkpoint redundante aqui fazia SELECT sair em vez de
+            // iniciar/parar o spam.
             while (current_submenu_index == 1 && !feature_exit_requested) {
                 current_submenu_index = 1;
                 in_sub_menu = true;
                 BeaconSpammer::beaconSpamLoop();
-                if (isButtonPressed(BTN_SELECT)) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1280,24 +1474,16 @@ void handleWiFiSubmenuButtons() {
             feature_active = true;
             feature_exit_requested = false;
             Deauther::deautherSetup();
+            // Saida e so do deautherLoop() (fisico LEFT na lista de scan),
+            // que seta feature_exit_requested. NAO ter um checkpoint de saida
+            // aqui tambem em cima do SELECT -- SELECT agora e "View"/start-stop.
             while (current_submenu_index == 2 && !feature_exit_requested) {
                 current_submenu_index = 2;
                 in_sub_menu = true;
                 Deauther::deautherLoop();
-                if (isButtonPressed(BTN_SELECT)) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1314,24 +1500,17 @@ void handleWiFiSubmenuButtons() {
             feature_active = true;
             feature_exit_requested = false;
             ProbeRequestFlood::probeRequestFloodSetup();
+            // Saida e so do probeRequestFloodLoop() (fisico LEFT na lista de
+            // scan), que seta feature_exit_requested. NAO ter um checkpoint
+            // de saida aqui tambem em cima do SELECT -- SELECT agora e
+            // "View"/start-stop.
             while (current_submenu_index == 3 && !feature_exit_requested) {
                 current_submenu_index = 3;
                 in_sub_menu = true;
                 ProbeRequestFlood::probeRequestFloodLoop();
-                if (isButtonPressed(BTN_SELECT)) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1574,6 +1753,41 @@ void handleWiFiSubmenuButtons() {
                 delay(200);
             }
         }
+        if (wifi_submenu_page == 1 && current_submenu_index == 3) {
+            current_submenu_index = 3;
+            in_sub_menu = true;
+            feature_active = true;
+            feature_exit_requested = false;
+            ChannelGraph::channelGraphSetup();
+            while (wifi_submenu_page == 1 && current_submenu_index == 3 && !feature_exit_requested) {
+                current_submenu_index = 3;
+                in_sub_menu = true;
+                ChannelGraph::channelGraphLoop();
+                // LEFT exits here (not SELECT/featureExitButtonPressed): SELECT is
+                // Rescan for this feature.
+                if (isButtonPressed(BTN_LEFT)) {
+                    in_sub_menu = true;
+                    is_main_menu = false;
+                    submenu_initialized = false;
+                    feature_active = false;
+                    feature_exit_requested = false;
+                    displaySubmenu();
+                    delay(200);
+                    while (isButtonPressed(BTN_LEFT)) {
+                    }
+                    break;
+                }
+            }
+            if (feature_exit_requested) {
+                in_sub_menu = true;
+                is_main_menu = false;
+                submenu_initialized = false;
+                feature_active = false;
+                feature_exit_requested = false;
+                displaySubmenu();
+                delay(200);
+            }
+        }
     }
 
     if (!feature_active) {
@@ -1633,24 +1847,17 @@ void handleWiFiSubmenuButtons() {
                     feature_active = true;
                     feature_exit_requested = false;
                     PacketMonitor::ptmSetup();
+                    // Saida e so do ptmLoop() (fisico LEFT / touch "Exit"), que seta
+                    // feature_exit_requested. NAO ter um checkpoint de saida aqui
+                    // tambem em cima do SELECT -- SELECT ficou livre nesta tela, e um
+                    // checkpoint redundante aqui fazia SELECT sair por engano.
                     while (current_submenu_index == 0 && !feature_exit_requested) {
                         current_submenu_index = 0;
                         in_sub_menu = true;
                         PacketMonitor::ptmLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -1665,24 +1872,18 @@ void handleWiFiSubmenuButtons() {
                     feature_active = true;
                     feature_exit_requested = false;
                     BeaconSpammer::beaconSpamSetup();
+                    // Saida e so do beaconSpamLoop() (fisico LEFT / touch "Exit"), que
+                    // seta feature_exit_requested. NAO ter um checkpoint de saida aqui
+                    // tambem em cima do SELECT -- SELECT agora e o start/stop do spam,
+                    // e um checkpoint redundante aqui fazia SELECT sair em vez de
+                    // iniciar/parar o spam.
                     while (current_submenu_index == 1 && !feature_exit_requested) {
                         current_submenu_index = 1;
                         in_sub_menu = true;
                         BeaconSpammer::beaconSpamLoop();
-                        if (isButtonPressed(BTN_SELECT)) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -1697,24 +1898,17 @@ void handleWiFiSubmenuButtons() {
                     feature_active = true;
                     feature_exit_requested = false;
                     Deauther::deautherSetup();
+                    // Saida e so do deautherLoop() (fisico LEFT na lista de
+                    // scan), que seta feature_exit_requested. NAO ter um
+                    // checkpoint de saida aqui tambem em cima do SELECT --
+                    // SELECT agora e "View"/start-stop.
                     while (current_submenu_index == 2 && !feature_exit_requested) {
                         current_submenu_index = 2;
                         in_sub_menu = true;
                         Deauther::deautherLoop();
-                        if (isButtonPressed(BTN_SELECT)) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -1729,24 +1923,17 @@ void handleWiFiSubmenuButtons() {
                     feature_active = true;
                     feature_exit_requested = false;
                     ProbeRequestFlood::probeRequestFloodSetup();
+                    // Saida e so do probeRequestFloodLoop() (fisico LEFT na
+                    // lista de scan), que seta feature_exit_requested. NAO
+                    // ter um checkpoint de saida aqui tambem em cima do
+                    // SELECT -- SELECT agora e "View"/start-stop.
                     while (current_submenu_index == 3 && !feature_exit_requested) {
                         current_submenu_index = 3;
                         in_sub_menu = true;
                         ProbeRequestFlood::probeRequestFloodLoop();
-                        if (isButtonPressed(BTN_SELECT)) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -1979,6 +2166,40 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
+                } else if (wifi_submenu_page == 1 && current_submenu_index == 3) {
+                    current_submenu_index = 3;
+                    in_sub_menu = true;
+                    feature_active = true;
+                    feature_exit_requested = false;
+                    ChannelGraph::channelGraphSetup();
+                    while (wifi_submenu_page == 1 && current_submenu_index == 3 && !feature_exit_requested) {
+                        current_submenu_index = 3;
+                        in_sub_menu = true;
+                        ChannelGraph::channelGraphLoop();
+                        // LEFT exits here (not SELECT/featureExitButtonPressed): SELECT is
+                        // Rescan for this feature.
+                        if (isButtonPressed(BTN_LEFT)) {
+                            in_sub_menu = true;
+                            is_main_menu = false;
+                            submenu_initialized = false;
+                            feature_active = false;
+                            feature_exit_requested = false;
+                            displaySubmenu();
+                            delay(200);
+                            while (isButtonPressed(BTN_LEFT)) {
+                            }
+                            break;
+                        }
+                    }
+                    if (feature_exit_requested) {
+                        in_sub_menu = true;
+                        is_main_menu = false;
+                        submenu_initialized = false;
+                        feature_active = false;
+                        feature_exit_requested = false;
+                        displaySubmenu();
+                        delay(200);
+                    }
                 }
                 break;
             }
@@ -1987,23 +2208,49 @@ void handleWiFiSubmenuButtons() {
 }
 
 void handleBluetoothSubmenuButtons() {
+    if (isButtonPressed(BTN_LEFT)) {   // "<" fisico volta ao menu principal
+        waitButtonReleased(BTN_LEFT);  // espera soltar de verdade (evita reler o mesmo toque)
+        in_sub_menu = false;
+        feature_active = false;
+        feature_exit_requested = false;
+        bluetooth_submenu_page = 0;
+        displayMenu();
+        handleButtons();
+        is_main_menu = false;
+        return;
+    }
+
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         last_interaction_time = millis();
         displaySubmenu();
-        delay(200);
+        waitButtonReleased(BTN_UP);
     }
 
     if (isButtonPressed(BTN_DOWN)) {
         current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
         last_interaction_time = millis();
         displaySubmenu();
-        delay(200);
+        waitButtonReleased(BTN_DOWN);
+    }
+
+    // RIGHT no item selecionado: abre uma tela cheia com a info (EN + PT-BR)
+    // (so nas 8 features da pagina 0, que tem texto cadastrado em bluetooth_page0_info_*).
+    if (isButtonPressed(BTN_RIGHT)) {
+        waitButtonReleased(BTN_RIGHT);
+        if (bluetooth_submenu_page == 0 && current_submenu_index < BT_PAGE0_FEATURES) {
+            showFeatureInfoScreen(bluetooth_page0_items[current_submenu_index],
+                                  bluetooth_page0_info[current_submenu_index]);
+            submenu_initialized = false;
+            last_submenu_index = -1;
+            displaySubmenu();
+        }
+        return;
     }
 
     if (isButtonPressed(BTN_SELECT)) {
         last_interaction_time = millis();
-        delay(70);
+        waitButtonReleased(BTN_SELECT);
 
         if (current_submenu_index == pagedPageBtnIndex()) {
             bluetooth_submenu_page = (bluetooth_submenu_page == 0) ? 1 : 0;
@@ -2632,6 +2879,17 @@ void handleBluetoothSubmenuButtons() {
 }
 
 void handleNRFSubmenuButtons() {
+    if (isButtonPressed(BTN_LEFT)) {   // "<" fisico volta ao menu principal
+        waitButtonReleased(BTN_LEFT);  // espera soltar de verdade (evita reler o mesmo toque)
+        in_sub_menu = false;
+        feature_active = false;
+        feature_exit_requested = false;
+        displayMenu();
+        handleButtons();
+        is_main_menu = false;
+        return;
+    }
+
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         if (current_submenu_index < 0) {
@@ -2639,7 +2897,7 @@ void handleNRFSubmenuButtons() {
         }
         last_interaction_time = millis();
         displaySubmenu();
-        delay(200);
+        waitButtonReleased(BTN_UP);
     }
 
     if (isButtonPressed(BTN_DOWN)) {
@@ -2649,12 +2907,26 @@ void handleNRFSubmenuButtons() {
         }
         last_interaction_time = millis();
         displaySubmenu();
-        delay(200);
+        waitButtonReleased(BTN_DOWN);
+    }
+
+    // RIGHT no item selecionado: abre uma tela cheia com a info (EN + PT-BR)
+    // (nao mostra no ultimo item, "Back to Main Menu").
+    if (isButtonPressed(BTN_RIGHT)) {
+        waitButtonReleased(BTN_RIGHT);
+        if (current_submenu_index < nrf_NUM_SUBMENU_ITEMS - 1) {
+            showFeatureInfoScreen(nrf_submenu_items[current_submenu_index],
+                                  nrf_info[current_submenu_index]);
+            submenu_initialized = false;
+            last_submenu_index = -1;
+            displaySubmenu();
+        }
+        return;
     }
 
     if (isButtonPressed(BTN_SELECT)) {
         last_interaction_time = millis();
-        delay(200);
+        waitButtonReleased(BTN_SELECT);
 
         if (current_submenu_index == 6) {
             in_sub_menu = false;
@@ -3107,6 +3379,17 @@ void handleNRFSubmenuButtons() {
 }
 
 void handleSubGHzSubmenuButtons() {
+    if (isButtonPressed(BTN_LEFT)) {   // "<" fisico volta ao menu principal
+        waitButtonReleased(BTN_LEFT);  // espera soltar de verdade (evita reler o mesmo toque)
+        in_sub_menu = false;
+        feature_active = false;
+        feature_exit_requested = false;
+        displayMenu();
+        handleButtons();
+        is_main_menu = false;
+        return;
+    }
+
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         if (current_submenu_index < 0) {
@@ -3114,7 +3397,7 @@ void handleSubGHzSubmenuButtons() {
         }
         last_interaction_time = millis();
         displaySubmenu();
-        delay(200);
+        waitButtonReleased(BTN_UP);
     }
 
     if (isButtonPressed(BTN_DOWN)) {
@@ -3124,12 +3407,26 @@ void handleSubGHzSubmenuButtons() {
         }
         last_interaction_time = millis();
         displaySubmenu();
-        delay(200);
+        waitButtonReleased(BTN_DOWN);
+    }
+
+    // RIGHT no item selecionado: abre uma tela cheia com a info (EN + PT-BR)
+    // (nao mostra no ultimo item, "Back to Main Menu").
+    if (isButtonPressed(BTN_RIGHT)) {
+        waitButtonReleased(BTN_RIGHT);
+        if (current_submenu_index < subghz_NUM_SUBMENU_ITEMS - 1) {
+            showFeatureInfoScreen(subghz_submenu_items[current_submenu_index],
+                                  subghz_info[current_submenu_index]);
+            submenu_initialized = false;
+            last_submenu_index = -1;
+            displaySubmenu();
+        }
+        return;
     }
 
     if (isButtonPressed(BTN_SELECT)) {
         last_interaction_time = millis();
-        delay(200);
+        waitButtonReleased(BTN_SELECT);
 
         if (current_submenu_index == 5) {
             in_sub_menu = false;
@@ -3569,23 +3866,48 @@ static void launchToolsFeature(int idx) {
 }
 
 void handleToolsSubmenuButtons() {
+    if (isButtonPressed(BTN_LEFT)) {   // "<" fisico volta ao menu principal
+        waitButtonReleased(BTN_LEFT);  // espera soltar de verdade (evita reler o mesmo toque)
+        in_sub_menu = false;
+        feature_active = false;
+        feature_exit_requested = false;
+        displayMenu();
+        handleButtons();
+        is_main_menu = false;
+        return;
+    }
+
     if (isButtonPressed(BTN_UP)) {
         current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         last_interaction_time = millis();
         displaySubmenu();
-        delay(200);
+        waitButtonReleased(BTN_UP);
     }
 
     if (isButtonPressed(BTN_DOWN)) {
         current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
         last_interaction_time = millis();
         displaySubmenu();
-        delay(200);
+        waitButtonReleased(BTN_DOWN);
+    }
+
+    // RIGHT no item selecionado: abre uma tela cheia com a info (EN + PT-BR)
+    // (nao mostra no ultimo item, "Back to Main Menu").
+    if (isButtonPressed(BTN_RIGHT)) {
+        waitButtonReleased(BTN_RIGHT);
+        if (current_submenu_index < tools_NUM_SUBMENU_ITEMS - 1) {
+            showFeatureInfoScreen(tools_submenu_items[current_submenu_index],
+                                  tools_info[current_submenu_index]);
+            submenu_initialized = false;
+            last_submenu_index = -1;
+            displaySubmenu();
+        }
+        return;
     }
 
     if (isButtonPressed(BTN_SELECT)) {
         last_interaction_time = millis();
-        delay(200);
+        waitButtonReleased(BTN_SELECT);
 
         if (current_submenu_index == TOOLS_IDX_BACK) {
             in_sub_menu = false;
@@ -3778,7 +4100,7 @@ void handleOtherSubmenuButtons() {
             }
             last_interaction_time = millis();
             displaySubmenu();
-            delay(200);
+            waitButtonReleased(BTN_UP);
         }
 
         if (isButtonPressed(BTN_DOWN)) {
@@ -3790,7 +4112,7 @@ void handleOtherSubmenuButtons() {
             }
             last_interaction_time = millis();
             displaySubmenu();
-            delay(200);
+            waitButtonReleased(BTN_DOWN);
         }
 
         if (isButtonPressed(BTN_LEFT)) {
@@ -3802,7 +4124,7 @@ void handleOtherSubmenuButtons() {
             }
             last_interaction_time = millis();
             displaySubmenu();
-            delay(200);
+            waitButtonReleased(BTN_LEFT);
         }
 
         if (isButtonPressed(BTN_RIGHT)) {
@@ -3814,7 +4136,7 @@ void handleOtherSubmenuButtons() {
             }
             last_interaction_time = millis();
             displaySubmenu();
-            delay(200);
+            waitButtonReleased(BTN_RIGHT);
         }
     } else {
         if (isButtonPressed(BTN_UP)) {
@@ -3822,20 +4144,64 @@ void handleOtherSubmenuButtons() {
                 (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
             last_interaction_time = millis();
             displaySubmenu();
-            delay(200);
+            waitButtonReleased(BTN_UP);
         }
 
         if (isButtonPressed(BTN_DOWN)) {
             current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
             last_interaction_time = millis();
             displaySubmenu();
+            waitButtonReleased(BTN_DOWN);
+        }
+
+        // RIGHT no item selecionado: abre uma tela cheia com a info, no
+        // idioma escolhido em Settings > Info Language (nao mostra no ultimo
+        // item de cada lista, "Back to Main Menu").
+        if (isButtonPressed(BTN_RIGHT)) {
+            waitButtonReleased(BTN_RIGHT);
+            const char* infoTitle = nullptr;
+            const InfoText* infoRef = nullptr;
+            if (other_layer == OTHER_LAYER_IR && current_submenu_index < ir_NUM_SUBMENU_ITEMS - 1) {
+                infoTitle = ir_submenu_items[current_submenu_index];
+                infoRef = &ir_info[current_submenu_index];
+            } else if (other_layer == OTHER_LAYER_RFID && current_submenu_index < rfid_NUM_SUBMENU_ITEMS - 1) {
+                infoTitle = rfid_submenu_items[current_submenu_index];
+                infoRef = &rfid_info[current_submenu_index];
+            } else if (other_layer == OTHER_LAYER_GPS && current_submenu_index < gps_NUM_SUBMENU_ITEMS - 1) {
+                infoTitle = gps_submenu_items[current_submenu_index];
+                infoRef = &gps_info[current_submenu_index];
+            }
+            if (infoTitle && infoRef) {
+                showFeatureInfoScreen(infoTitle, *infoRef);
+                submenu_initialized = false;
+                last_submenu_index = -1;
+                displaySubmenu();
+            }
+            return;
+        }
+
+        // Botao fisico "<" nos submenus (IR, RFID/NFC, GPS) volta para "More".
+        if (isButtonPressed(BTN_LEFT)) {
+            waitButtonReleased(BTN_LEFT);  // espera soltar de verdade (evita reler o mesmo toque)
+            other_layer = OTHER_LAYER_HOME;
+            other_menu_grid_initialized = false;
+            last_other_menu_index = -1;
+            current_submenu_index = 0;
+            feature_active = false;
+            feature_exit_requested = false;
+            updateActiveSubmenu();
+            submenu_initialized = false;
+            last_interaction_time = millis();
+            displaySubmenu();
+            is_main_menu = false;
             delay(200);
+            return;
         }
     }
 
     if (isButtonPressed(BTN_SELECT)) {
         last_interaction_time = millis();
-        delay(200);
+        waitButtonReleased(BTN_SELECT);
 
         if (other_layer == OTHER_LAYER_HOME) {
             if (current_submenu_index == other_NUM_SUBMENU_ITEMS - 1) {
@@ -3956,18 +4322,26 @@ void handleOtherSubmenuButtons() {
                     current_submenu_index = 2;
                     in_sub_menu = true;
                     IRUniversalController::loop();
-                    if (featureExitButtonPressed()) {
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                        while (featureExitButtonPressed()) {
-                        }
-                        break;
-                    }
+                }
+                if (feature_exit_requested) {
+                    in_sub_menu = true;
+                    is_main_menu = false;
+                    submenu_initialized = false;
+                    feature_active = false;
+                    feature_exit_requested = false;
+                    displaySubmenu();
+                    delay(200);
+                }
+            } else if (current_submenu_index == 3) {
+                current_submenu_index = 3;
+                in_sub_menu = true;
+                feature_active = true;
+                feature_exit_requested = false;
+                IRUniversalAC::setup();
+                while (current_submenu_index == 3 && !feature_exit_requested) {
+                    current_submenu_index = 3;
+                    in_sub_menu = true;
+                    IRUniversalAC::loop();
                 }
                 if (feature_exit_requested) {
                     in_sub_menu = true;
@@ -4173,18 +4547,26 @@ void handleOtherSubmenuButtons() {
                     current_submenu_index = 2;
                     in_sub_menu = true;
                     IRUniversalController::loop();
-                    if (featureExitButtonPressed()) {
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                        while (featureExitButtonPressed()) {
-                        }
-                        break;
-                    }
+                }
+                if (feature_exit_requested) {
+                    in_sub_menu = true;
+                    is_main_menu = false;
+                    submenu_initialized = false;
+                    feature_active = false;
+                    feature_exit_requested = false;
+                    displaySubmenu();
+                    delay(200);
+                }
+            } else if (current_submenu_index == 3) {
+                current_submenu_index = 3;
+                in_sub_menu = true;
+                feature_active = true;
+                feature_exit_requested = false;
+                IRUniversalAC::setup();
+                while (current_submenu_index == 3 && !feature_exit_requested) {
+                    current_submenu_index = 3;
+                    in_sub_menu = true;
+                    IRUniversalAC::loop();
                 }
                 if (feature_exit_requested) {
                     in_sub_menu = true;
@@ -4288,6 +4670,52 @@ void handleAboutPage() {
   tft.setCursor(xValue, y);
   tftPrintObf(OBF_WB, sizeof(OBF_WB));
 
+  // ---- HARDWARE section (grouped by status, from boot-time detection) ----
+  // Slot modules fall into Installed (detected) or Supported (absent); the
+  // SoC/board items are fixed. Labels right-pad so the ':' column lines up.
+  {
+    String installed, supported;
+    auto add = [](String& s, const char* name) {
+      if (s.length()) s += ", ";
+      s += name;
+    };
+    g_hwPresence.cc1101 ? add(installed, "Sub-GHz")  : add(supported, "Sub-GHz");
+    g_hwPresence.nrf24  ? add(installed, "2.4GHz")   : add(supported, "2.4GHz");
+    g_hwPresence.gps    ? add(installed, "GPS")      : add(supported, "GPS");
+    g_hwPresence.pn532  ? add(installed, "NFC/RFID") : add(supported, "NFC/RFID");
+    if (!installed.length()) installed = "-";
+    if (!supported.length()) supported = "-";
+
+    tft.drawFastHLine(12, 186, 216, UI_LINE);
+
+    tft.setTextColor(UI_ICON, UI_BG);
+    tft.setCursor(16, 194);
+    tft.print("HARDWARE");
+
+    const int hwLabelX = 16;
+    const int hwColonX = 16 + 11 * 6 + 2;   // 11 chars (longest = "Unsupported")
+    const int hwValueX = hwColonX + 8;
+    int hy = 214;
+    const int hstep = 20;
+
+    auto row = [&](const char* label, const String& value) {
+      tft.setTextColor(UI_DIM_TEXT, UI_BG);
+      tft.setCursor(hwLabelX, hy);
+      tft.print(label);
+      tft.setCursor(hwColonX, hy);
+      tft.print(":");
+      tft.setTextColor(UI_TEXT, UI_BG);
+      tft.setCursor(hwValueX, hy);
+      tft.print(value);
+      hy += hstep;
+    };
+
+    row("Built-in",    "WiFi 2.4GHz, BLE, IR, SD");
+    row("Installed",   installed);
+    row("Supported",   supported);
+    row("Unsupported", "WiFi 5GHz");
+  }
+
   tft.setTextColor(UI_DIM_TEXT, UI_BG);
   tft.setCursor(16, 300);
   tft.print("SELECT / tap to go back");
@@ -4296,7 +4724,7 @@ void handleAboutPage() {
     if (isButtonPressed(BTN_SELECT) || isButtonPressed(BTN_LEFT)) {
       last_interaction_time = millis();
       feature_exit_requested = true;
-      delay(200);
+      { uint32_t t = millis(); while ((uint32_t)(millis() - t) < BTN_ACTION_RELEASE_MS) { if (isButtonPressed(BTN_SELECT) || isButtonPressed(BTN_LEFT)) t = millis(); delay(5); } }
       break;
     }
 
@@ -4366,7 +4794,7 @@ void handleButtons() {
             }
             last_interaction_time = millis();
             displayMenu();
-            delay(200);
+            waitButtonReleased(BTN_UP);
         }
 
         if (isButtonPressed(BTN_DOWN) && !is_main_menu) {
@@ -4376,40 +4804,41 @@ void handleButtons() {
             }
             last_interaction_time = millis();
             displayMenu();
-            delay(200);
+            waitButtonReleased(BTN_DOWN);
         }
 
+        // Grade de 2 colunas x 4 linhas (col = indice/4, linha = indice%4).
+        // LEFT/RIGHT andam na ordem de "leitura": mesma linha troca de coluna,
+        // na volta da coluna direita passa pra proxima linha (e vice-versa).
         if (isButtonPressed(BTN_LEFT) && !is_main_menu) {
             int row = current_menu_index % 4;
-            if (current_menu_index >= 4) {
-                current_menu_index = row;
-            } else if (current_menu_index == 0) {
-                current_menu_index = 3;
+            int col = current_menu_index / 4;
+            if (col == 1) {
+                current_menu_index = row;                    // mesma linha, coluna esquerda
             } else {
-                current_menu_index = row - 1;
+                current_menu_index = ((row - 1 + 4) % 4) + 4; // linha anterior, coluna direita
             }
             last_interaction_time = millis();
             displayMenu();
-            delay(200);
+            waitButtonReleased(BTN_LEFT);
         }
 
         if (isButtonPressed(BTN_RIGHT) && !is_main_menu) {
             int row = current_menu_index % 4;
-            if (current_menu_index < 4) {
-                current_menu_index = row + 4;
-            } else if (current_menu_index == 7) {
-                current_menu_index = 0;
+            int col = current_menu_index / 4;
+            if (col == 0) {
+                current_menu_index = row + 4;       // mesma linha, coluna direita
             } else {
-                current_menu_index = row + 5;
+                current_menu_index = (row + 1) % 4; // proxima linha, coluna esquerda
             }
             last_interaction_time = millis();
             displayMenu();
-            delay(200);
+            waitButtonReleased(BTN_RIGHT);
         }
 
         if (isButtonPressed(BTN_SELECT)) {
             last_interaction_time = millis();
-            delay(200);
+            waitButtonReleased(BTN_SELECT);
 
             if (current_menu_index == 3) {
                 handleSettingsSubmenuButtons();
@@ -4560,6 +4989,11 @@ void setup() {
 #if FEATURE_BLE_DUCKY
   Ducky::setup();
 #endif
+
+  // Probe optional radios/modules once, before the scanners start and before
+  // the touchscreen setup (several share GPIO5 / the SPI buses). For the About
+  // screen's HARDWARE section.
+  hwDetectAll();
 
 #if BOARD_HAS_ESP32S3
   WifiScan::startBackgroundScanner();

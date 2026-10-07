@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include "shared.h"
+#include "Lang.h"
 
 #ifndef SETTINGS_PATH
 #define SETTINGS_PATH "/config/settings.json"
@@ -17,6 +18,8 @@ struct AppSettings {
 
   bool     autoWifiScan    = true;
   bool     autoBleScan     = true;
+
+  uint8_t  infoLang = INFO_LANG_PT_BR;  // language shown on feature "info" screens
 
   uint16_t touchXMin = TOUCH_X_MIN;
   uint16_t touchXMax = TOUCH_X_MAX;

@@ -105,6 +105,10 @@ bool settingsLoad() {
 
   s.autoWifiScan    = doc["autoWifiScan"]    | s.autoWifiScan;
   s.autoBleScan     = doc["autoBleScan"]     | s.autoBleScan;
+  {
+    uint8_t lang = doc["infoLang"] | s.infoLang;
+    s.infoLang = (lang < INFO_LANG_COUNT) ? lang : INFO_LANG_PT_BR;
+  }
 
   if (s.autoWifiScan != s.autoBleScan) {
     bool en = (s.autoWifiScan || s.autoBleScan);
@@ -151,6 +155,7 @@ bool settingsSave() {
 
   doc["autoWifiScan"]    = s.autoWifiScan;
   doc["autoBleScan"]     = s.autoBleScan;
+  doc["infoLang"]        = s.infoLang;
 
   JsonObject t = doc.createNestedObject("touch");
   t["xMin"] = s.touchXMin;

@@ -26,6 +26,8 @@ void updateStatusBar();
 /** Stop GPS wardriver background task before WiFi/BLE features use the radio. */
 void pauseBackgroundRadioTasks();
 float readBatteryVoltage();
+bool ip5306ReadReg(uint8_t reg, uint8_t& out);
+int ip5306ChargeStatus();   // 0=on battery, 1=charging, 2=plugged & full
 float readInternalTemperature();
 bool isSDCardAvailable();
 /** After SPI is used for another device (nRF24 / CC1101 / PN532), restore pins,
@@ -61,6 +63,9 @@ bool isTouchNavButtonPressedEdge(int buttonPin);
 bool isButtonPressedEdge(int buttonPin);
 /** Exit/back: level-sensitive so slow feature loops still catch PCF + touch nav. */
 bool featureExitButtonPressed();
+/** Bloqueia at ficar solto de verdade (fisico ou touch nav) por ~60ms continuos.
+ *  Evita reler o mesmo toque como uma 2a acao (dobro de canal, saida em cascata etc). */
+void waitButtonReleased(int buttonPin);
 void setTouchButtonInputEnabled(bool enabled);
 void drawTouchButtonCue();
 void invalidateTouchButtonCue();

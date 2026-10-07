@@ -14,3 +14,8 @@ namespace IRUniversalController {
   void setup();
   void loop();
 }
+
+namespace IRUniversalAC {
+  void setup();
+  void loop();
+}

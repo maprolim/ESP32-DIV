@@ -715,6 +715,10 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #elif defined(BOARD_CYD)
 #define BATTERY_ADC_PIN -1
 #else
+// V2: VBAT has a 100k/100k divider to GPIO2, but IO2 also drives the buzzer
+// transistor (Q1) whose base-emitter junction clamps the pin to ~0.66V, so the
+// ADC cannot read the pack voltage. Keep -1 and report level via the IP5306
+// over I2C instead (see readBatteryVoltage/readIp5306Percent in utils.cpp).
 #define BATTERY_ADC_PIN -1
 #endif
 #endif

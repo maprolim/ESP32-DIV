@@ -2,6 +2,7 @@
 #include <IRrecv.h>
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
+#include <ir_LG.h>
 #include <IRutils.h>
 #include <ArduinoJson.h>
 #include <SD.h>
@@ -54,6 +55,64 @@ static void irSetUniversalRemoteNavLabels() {
 static void irSetUniversalBrowseNavLabels() {
   setTouchNavLabels("Back", "Next", "Exit", "Prev", "Select");
 }
+
+// Navegacao por linha/coluna (dir: 0=cima,1=baixo,2=esq,3=dir). Pula desabilitados.
+// Cima/baixo: vai para a linha mais proxima na vertical (coluna so desempata).
+// Esq/dir: anda apenas dentro da mesma linha (|dy| <= altura do botao).
+static int irNavSelect(const FeatureUI::Button* b, int n, int cur, int dir) {
+  if (n <= 0) return cur;
+  if (cur < 0 || cur >= n) cur = 0;
+  const int cx = b[cur].x + b[cur].w / 2;
+  const int cy = b[cur].y + b[cur].h / 2;
+  const long rowTol = b[cur].h > 16 ? b[cur].h : 16;   // tolerancia de "mesma linha"
+  int best = -1; long bestCost = 2147483647L;
+  int bestAny = -1; long bestAnyCost = 2147483647L;    // fallback esq/dir (qualquer linha)
+  for (int i = 0; i < n; i++) {
+    if (i == cur) continue;
+    if (b[i].w <= 0 || b[i].h <= 0 || b[i].disabled) continue;
+    const int dx = (b[i].x + b[i].w / 2) - cx;
+    const int dy = (b[i].y + b[i].h / 2) - cy;
+    const long adx = dx < 0 ? -dx : dx;
+    const long ady = dy < 0 ? -dy : dy;
+    bool ok = false; long cost = 0;
+    switch (dir) {
+      case 0: ok = dy < -2; cost = ady * 1000 + adx; break; // cima: linha mais proxima
+      case 1: ok = dy >  2; cost = ady * 1000 + adx; break; // baixo
+      case 2: // esq: mesma linha; senao, mais proximo a esquerda
+        if (dx < -2) {
+          const long any = adx * 1000 + ady;
+          if (any < bestAnyCost) { bestAnyCost = any; bestAny = i; }
+          if (ady <= rowTol) { ok = true; cost = any; }
+        }
+        break;
+      case 3: // dir: mesma linha; senao, mais proximo a direita
+        if (dx > 2) {
+          const long any = adx * 1000 + ady;
+          if (any < bestAnyCost) { bestAnyCost = any; bestAny = i; }
+          if (ady <= rowTol) { ok = true; cost = any; }
+        }
+        break;
+    }
+    if (!ok) continue;
+    if (cost < bestCost) { bestCost = cost; best = i; }
+  }
+  if (best >= 0) return best;
+  if ((dir == 2 || dir == 3) && bestAny >= 0) return bestAny;  // fallback
+  return cur;
+}
+
+// Verdadeiro se nenhum botao (habilitado) tem centro a esquerda do atual.
+static bool irIsLeftEdge(const FeatureUI::Button* b, int n, int cur) {
+  if (cur < 0 || cur >= n) return true;
+  const int cx = b[cur].x + b[cur].w / 2;
+  for (int i = 0; i < n; i++) {
+    if (i == cur) continue;
+    if (b[i].w <= 0 || b[i].h <= 0 || b[i].disabled) continue;
+    if ((b[i].x + b[i].w / 2) < cx - 2) return false;
+  }
+  return true;
+}
+
 
 
 namespace IRRemoteFeature {
@@ -2035,6 +2094,8 @@ enum KeyId : uint8_t {
   Right,
   Ok,
   Back,
+  Home,
+  Guide,
   KeyCount
 };
 
@@ -2052,6 +2113,8 @@ static const char* keyLabel(KeyId k) {
     case Right: return "RIGHT";
     case Ok:    return "OK";
     case Back:  return "BACK";
+    case Home:  return "HOME";
+    case Guide: return "GUIDE";
     default:    return "?";
   }
 }
@@ -2060,6 +2123,8 @@ struct Profile {
   String name;
   String category;
   String brand;
+  String model;
+  bool fromSd = false;
   decode_type_t proto = decode_type_t::UNKNOWN;
   uint16_t bits = 0;
   // Keep as 64-bit so we can support protocols like RC6 (36-bit), Panasonic (48-bit),
@@ -2077,21 +2142,11 @@ static bool s_loadedFromSd = false;
 
 static FeatureUI::Button s_keyBtns[KeyCount];
 
-// Browser state.
-enum class Screen : uint8_t { Remote, Category, Brand, Profile };
-static Screen s_screen = Screen::Remote;
-static std::vector<String> s_categories;
-static std::vector<String> s_brands;
-static std::vector<int> s_filteredProfileIdx;   
-static String s_selectedCategory = "";
-static String s_selectedBrand = "";
-static int s_listSel = 0;
-static uint32_t s_browseVersion = 0;
 
 static const unsigned char* keyIcon(KeyId k) {
   switch (k) {
     case Power: return bitmap_icon_power;
-    case Mute:  return bitmap_icon_dialog;
+    case Mute:  return nullptr;  // desenhado como texto "MUTE"
     case VolUp: return bitmap_icon_sort_up_plus;
     case VolDn: return bitmap_icon_sort_down_minus;
     case ChUp:  return bitmap_icon_UP;
@@ -2102,6 +2157,8 @@ static const unsigned char* keyIcon(KeyId k) {
     case Right: return bitmap_icon_RIGHT;
     case Ok:    return bitmap_icon_start;
     case Back:  return bitmap_icon_go_back;
+    case Home:  return bitmap_icon_house;
+    case Guide: return bitmap_icon_list;
     default:    return nullptr;
   }
 }
@@ -2123,6 +2180,16 @@ static void drawKeyButton(KeyId k, bool pressed = false) {
     const int ix = b.x + (b.w - iconSize) / 2;
     const int iy = b.y + (b.h - iconSize) / 2;
     tft.drawBitmap(ix, iy, ico, iconSize, iconSize, disabled ? UI_DIM_TEXT : UI_ICON);
+  } else {
+    // Sem ícone: desenha o rótulo como texto (ex.: MUTE)
+    const char* lbl = keyLabel(k);
+    tft.setTextFont(1);
+    tft.setTextSize(1);
+    const int tw = tft.textWidth(lbl, 1);
+    const uint16_t tc = disabled ? UI_DIM_TEXT : UI_ICON;  // mesma cor dos icones
+    tft.setTextColor(tc, fill);
+    tft.setCursor(b.x + (b.w - tw) / 2, b.y + (b.h - 8) / 2);
+    tft.print(lbl);
   }
 }
 
@@ -2167,6 +2234,8 @@ static bool keyFromToken(const String& tok, KeyId& out) {
   if (k == "RIGHT") { out = Right; return true; }
   if (k == "OK" || k == "ENTER" || k == "SELECT") { out = Ok; return true; }
   if (k == "BACK" || k == "RETURN" || k == "EXIT") { out = Back; return true; }
+  if (k == "HOME" || k == "SMARTHUB" || k == "SMART") { out = Home; return true; }
+  if (k == "GUIDE" || k == "EPG") { out = Guide; return true; }
   return false;
 }
 
@@ -2175,7 +2244,8 @@ static bool protoFromToken(const String& tok, decode_type_t& out) {
   if (p == "NEC") { out = decode_type_t::NEC; return true; }
   if (p == "NECLIKE") { out = decode_type_t::NEC_LIKE; return true; }
   if (p == "SONY" || p == "SIRC") { out = decode_type_t::SONY; return true; }
-  if (p == "SAMSUNG" || p == "SAMSUNG32" || p == "SAMSUNG36") { out = decode_type_t::SAMSUNG36; return true; }
+  if (p == "SAMSUNG" || p == "SAMSUNG32") { out = decode_type_t::SAMSUNG; return true; }
+  if (p == "SAMSUNG36") { out = decode_type_t::SAMSUNG36; return true; }
   if (p == "LG") { out = decode_type_t::LG; return true; }
   if (p == "LG2") { out = decode_type_t::LG2; return true; }
   if (p == "JVC") { out = decode_type_t::JVC; return true; }
@@ -2221,7 +2291,7 @@ static void loadBuiltinProfiles() {
   {
     Profile p{};
     p.name = "Samsung TV (common)";
-    p.proto = decode_type_t::SAMSUNG36;
+    p.proto = decode_type_t::SAMSUNG;
     p.bits = 32;
     p.code[Power] = 0xE0E040BFu; p.has[Power] = true;
     p.code[Mute]  = 0xE0E0F00Fu; p.has[Mute]  = true;
@@ -2353,6 +2423,11 @@ static void loadBuiltinProfiles() {
     s_profiles.push_back(p);
   }
 
+  for (auto& p : s_profiles) {
+    if (!p.category.length()) p.category = inferCategoryFromName(p.name);
+    if (!p.brand.length())    p.brand    = inferBrandFromName(p.name);
+  }
+
   s_lastErr = "Built-in profiles";
 }
 
@@ -2392,6 +2467,8 @@ static bool parseProfilesJson(File& f, size_t docCapacity, String* errOut = null
       if (!p.brand.length()) p.brand = inferBrandFromName(p.name);
       p.proto = proto;
       p.bits = (uint16_t)(o["bits"] | ((proto == decode_type_t::SONY) ? 12 : 32));
+      p.model = String((const char*)(o["model"] | ""));
+      p.fromSd = true;
 
       JsonObject codes = o["codes"].as<JsonObject>();
       if (!codes.isNull()) {
@@ -2454,6 +2531,8 @@ static bool parseProfilesJson(File& f, size_t docCapacity, String* errOut = null
     if (!p.brand.length()) p.brand = inferBrandFromName(p.name);
     p.proto = proto;
     p.bits = (uint16_t)(o["bits"] | ((proto == decode_type_t::SONY) ? 12 : 32));
+    p.model = String((const char*)(o["model"] | ""));
+    p.fromSd = true;
 
     JsonObject codes = o["codes"].as<JsonObject>();
     if (!codes.isNull()) {
@@ -2480,672 +2559,1237 @@ static bool parseProfilesJson(File& f, size_t docCapacity, String* errOut = null
   return false;
 }
 
+static int s_sdCount = 0;
+
+// Acrescenta (NAO limpa) os perfis do SD ao vetor atual. Marca fromSd=true no parser.
 static bool loadProfilesFromSd(String* errOut = nullptr) {
-  if (!isSDCardAvailable()) { if (errOut) *errOut = "SD not available"; return false; }
-  s_profiles.clear();
+  s_sdCount = 0;
+  if (!isSDCardAvailable()) { if (errOut) *errOut = "SD nao montado"; return false; }
 
   if (SD.exists(PROFILES_PATH)) {
     File f = SD.open(PROFILES_PATH, FILE_READ);
-    if (!f) { if (errOut) *errOut = "Open /ir_profiles.json failed"; return false; }
-    String perr;
-
-    bool ok = parseProfilesJson(f, 8192, &perr);
-    f.close();
-    if (!ok) { if (errOut) *errOut = perr; return false; }
-    if (errOut) *errOut = String("Loaded ") + String((int)s_profiles.size()) + " profiles";
-    return true;
-  }
-
-  if (!SD.exists(PROFILES_DIR)) { if (errOut) *errOut = "No /ir_profiles.json or /ir_profiles/"; return false; }
-  File d = SD.open(PROFILES_DIR);
-  if (!d) { if (errOut) *errOut = "Open /ir_profiles failed"; return false; }
-
-  uint16_t loaded = 0;
-  for (;;) {
-    File f = d.openNextFile();
-    if (!f) break;
-    if (!f.isDirectory()) {
-      String name = String(f.name());
-      if (endsWith(name, ".json")) {
-        String perr;
-        if (parseProfilesJson(f, 2048, &perr)) {
-          loaded++;
-          if ((int)s_profiles.size() >= (int)kMaxProfiles) { f.close(); break; }
-        }
-      }
+    if (f) {
+      int before = (int)s_profiles.size();
+      String perr;
+      parseProfilesJson(f, 8192, &perr);
+      f.close();
+      s_sdCount += (int)s_profiles.size() - before;
     }
-    f.close();
   }
-  d.close();
 
-  if (s_profiles.empty()) { if (errOut) *errOut = "No profiles in /ir_profiles/"; return false; }
-  if (errOut) *errOut = String("Loaded ") + String((int)s_profiles.size()) + " profiles";
+  if (SD.exists(PROFILES_DIR)) {
+    File d = SD.open(PROFILES_DIR);
+    if (d) {
+      for (;;) {
+        File f = d.openNextFile();
+        if (!f) break;
+        if (!f.isDirectory()) {
+          String name = String(f.name());
+          if (endsWith(name, ".json")) {
+            int before = (int)s_profiles.size();
+            String perr;
+            parseProfilesJson(f, 2048, &perr);
+            s_sdCount += (int)s_profiles.size() - before;
+          }
+        }
+        f.close();
+        if ((int)s_profiles.size() >= (int)kMaxProfiles) break;
+      }
+      d.close();
+    }
+  }
+
+  if (s_sdCount == 0) { if (errOut) *errOut = "Nenhum perfil no SD"; return false; }
+  if (errOut) *errOut = String(s_sdCount) + " do SD";
   return true;
 }
 
+// Carrega SEMPRE os embutidos e, por cima, acrescenta os do SD (cada um com sua tag).
 static void refreshProfiles() {
-  s_lastErr = "";
-  s_loadedFromSd = false;
+  s_profiles.clear();
+  loadBuiltinProfiles();            // fromSd = false
 
-  String err;
-  if (loadProfilesFromSd(&err)) {
-    s_loadedFromSd = true;
-    s_lastErr = String("SD: ") + (err.length() ? err : String((int)s_profiles.size()));
-  } else {
-    loadBuiltinProfiles();
-    s_loadedFromSd = false;
-    if (err.length()) s_lastErr = "Built-in (SD: " + err + ")";
-    else s_lastErr = "Built-in";
-  }
+  String sderr;
+  s_loadedFromSd = loadProfilesFromSd(&sderr);
+  s_lastErr = s_loadedFromSd ? sderr : (String("SD: ") + sderr);
 
-  if (s_profileIdx < 0) s_profileIdx = 0;
-  if (s_profileIdx >= (int)s_profiles.size()) s_profileIdx = 0;
+  if (s_profileIdx < 0 || s_profileIdx >= (int)s_profiles.size()) s_profileIdx = 0;
 }
 
-static void browseBack();
-static void openCategoryBrowser();
-static void reloadUniversalProfiles();
+// ============================================================================
+// Universal Controller - fluxo de 3 telas: Lista -> (Detalhes | Controle)
+// ============================================================================
 
-static void drawToolbar() {
-  tft.fillRect(0, kToolbarY, 240, kToolbarH, UI_FG);
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-  tft.drawBitmap(kIconBackX, kToolbarY, bitmap_icon_go_back, kIconSize, kIconSize, UI_ICON);
+static constexpr const char* RECENT_PATH = "/ir_profiles/recent.txt";
 
-  if (s_screen == Screen::Remote) {
-    tft.drawBitmap(kIconBrowseX, kToolbarY, bitmap_icon_list, kIconSize, kIconSize, UI_ICON);
-    tft.drawBitmap(kIconReloadX, kToolbarY, bitmap_icon_undo, kIconSize, kIconSize, UI_ICON);
-  }
+enum class Screen : uint8_t { List, Details, Control };
+static Screen s_screen = Screen::List;
 
-  tft.drawFastHLine(0, kToolbarBottom, 240, UI_LINE);
+static std::vector<int> s_order;           // todos os perfis, ordenados
+static std::vector<String> s_recentNames;  // persistido no SD, mais recente primeiro (<=3)
+static std::vector<int> s_recent;          // indices resolvidos dos recentes
+
+struct ListRow { int profileIdx; bool header; const char* label; };
+static std::vector<ListRow> s_rows;
+static int s_sel = 0;         // indice em s_rows (nunca um header)
+static int s_top = 0;         // primeira linha visivel
+static int s_selProfile = 0;  // perfil escolhido para Detalhes
+static int s_navSel = 0;      // botao do controle selecionado (tela Control)
+
+static constexpr int LIST_ROW_H = 20;
+static int listTopY()  { return kBodyTop + 6; }
+static int listBottom(){ return irContentBottom() - 4; }
+static int listRows()  {
+  int r = (listBottom() - listTopY()) / LIST_ROW_H;
+  return r < 1 ? 1 : r;
 }
 
-static void drawInfoPanel() {
-  const int panelH = kRemoteKeysTop - kBodyTop;
-  tft.fillRect(0, kBodyTop, 240, panelH, FEATURE_BG);
-
-  tft.drawRoundRect(kInfoBoxX, kInfoBoxY, kInfoBoxW, kInfoBoxH, 3, UI_LINE);
-  tft.setTextFont(1);
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.drawString("Profile", kInfoBoxX + 4, kInfoBoxY + 3);
-
-  if (s_profiles.empty()) {
-    tft.setTextColor(UI_WARN, FEATURE_BG);
-    tft.setCursor(kPadX, kInfoTextY);
-    tft.print(shortStatusLine(s_lastErr.length() ? s_lastErr : "No profiles", 32));
-    return;
+// ---------- recentes (persistencia no SD) ----------
+static void loadRecentNames() {
+  s_recentNames.clear();
+  if (!isSDCardAvailable()) return;
+  File f = SD.open(RECENT_PATH, FILE_READ);
+  if (!f) return;
+  while (f.available() && (int)s_recentNames.size() < 3) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length()) s_recentNames.push_back(line);
   }
-
-  const Profile& p = s_profiles[s_profileIdx];
-
-  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.setCursor(kPadX, kInfoTextY);
-  tft.print("Name:");
-  tft.setTextColor(UI_TEXT, FEATURE_BG);
-  tft.setCursor(kDetailValueX, kInfoTextY);
-  const int nameMaxW = kDetailCol2LabelX - kDetailValueX - 4;
-  tft.print(truncateWithEllipsis(p.name, nameMaxW));
-  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.setCursor(kDetailCol2LabelX, kInfoTextY);
-  tft.print("Idx:");
-  tft.setTextColor(UI_TEXT, FEATURE_BG);
-  tft.setCursor(kDetailCol2ValueX, kInfoTextY);
-  tft.printf("%d/%d", s_profileIdx + 1, (int)s_profiles.size());
-
-  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.setCursor(kPadX, kInfoTextY + kDetailLineStep);
-  tft.print("Type:");
-  tft.setTextColor(UI_TEXT, FEATURE_BG);
-  tft.setCursor(kDetailValueX, kInfoTextY + kDetailLineStep);
-  const int typeMaxW = kDetailCol2LabelX - kDetailValueX - 4;
-  tft.print(truncateWithEllipsis(String(typeToString(p.proto)), typeMaxW));
-  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.setCursor(kDetailCol2LabelX, kInfoTextY + kDetailLineStep);
-  tft.print("Bits:");
-  tft.setTextColor(UI_TEXT, FEATURE_BG);
-  tft.setCursor(kDetailCol2ValueX, kInfoTextY + kDetailLineStep);
-  tft.print((unsigned)p.bits);
-
-  tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
-  tft.setCursor(kPadX, kInfoTextY + (kDetailLineStep * 2));
-  tft.print("Src:");
-  tft.setTextColor(s_loadedFromSd ? UI_OK : UI_DIM_TEXT, FEATURE_BG);
-  tft.setCursor(kDetailValueX, kInfoTextY + (kDetailLineStep * 2));
-  tft.print(s_loadedFromSd ? "SD card" : "Built-in");
+  f.close();
 }
 
-static void drawBrowseHeader() {
-  tft.fillRect(0, kBodyTop, 240, kListY - kBodyTop, FEATURE_BG);
-  tft.setTextFont(1);
-  tft.setTextSize(1);
-  tft.setTextColor(UI_ICON, FEATURE_BG);
-  tft.setCursor(kPadX, kBrowseHeaderY);
-  if (s_screen == Screen::Category) {
-    tft.print("Select Category");
-  } else if (s_screen == Screen::Brand) {
-    tft.print("Brand:");
-    tft.setTextColor(UI_TEXT, FEATURE_BG);
-    tft.setCursor(kDetailValueX, kBrowseHeaderY);
-    String cat = s_selectedCategory.length() ? s_selectedCategory : "ALL";
-    if (cat.length() > 18) cat = cat.substring(0, 18);
-    tft.print(cat);
-  } else if (s_screen == Screen::Profile) {
-    tft.print("Profile:");
-    tft.setTextColor(UI_TEXT, FEATURE_BG);
-    tft.setCursor(kDetailValueX, kBrowseHeaderY);
-    String br = s_selectedBrand.length() ? s_selectedBrand : "ALL";
-    if (br.length() > 18) br = br.substring(0, 18);
-    tft.print(br);
-  }
-  tft.drawFastHLine(kPadX, kListY - 1, kListW, UI_LINE);
+static void saveRecentNames() {
+  if (!isSDCardAvailable()) return;
+  if (!SD.exists(PROFILES_DIR)) SD.mkdir(PROFILES_DIR);
+  if (SD.exists(RECENT_PATH)) SD.remove(RECENT_PATH);
+  File f = SD.open(RECENT_PATH, FILE_WRITE);
+  if (!f) return;
+  for (auto& n : s_recentNames) f.println(n);
+  f.close();
 }
 
-static bool handleToolbarTouch(int x, int y) {
-  if (y <= kToolbarY || y >= kToolbarBottom) return false;
+static void pushRecent(const String& name) {
+  if (!name.length()) return;
+  for (int i = 0; i < (int)s_recentNames.size(); i++) {
+    if (s_recentNames[i] == name) { s_recentNames.erase(s_recentNames.begin() + i); break; }
+  }
+  s_recentNames.insert(s_recentNames.begin(), name);
+  while ((int)s_recentNames.size() > 3) s_recentNames.pop_back();
+  saveRecentNames();
+}
 
-  if (x > kIconBackX && x < (kIconBackX + kIconSize)) {
-    if (s_screen == Screen::Remote) {
-      feature_exit_requested = true;
-    } else {
-      browseBack();
-      s_uiDrawn = false;
+// ---------- ordenacao / montagem de linhas ----------
+static void rebuildOrder() {
+  s_order.clear();
+  for (int i = 0; i < (int)s_profiles.size(); i++) s_order.push_back(i);
+  std::sort(s_order.begin(), s_order.end(), [](int a, int b) {
+    const Profile& pa = s_profiles[a];
+    const Profile& pb = s_profiles[b];
+    auto up = [](String s) { s.toUpperCase(); return s; };
+    String x, y;
+    x = up(pa.brand);    y = up(pb.brand);    if (x != y) return x < y;   // fabricante
+    x = up(pa.category); y = up(pb.category); if (x != y) return x < y;   // tipo
+    x = up(pa.model);    y = up(pb.model);    if (x != y) return x < y;   // modelo
+    x = up(pa.name);     y = up(pb.name);     return x < y;               // nome
+  });
+}
+
+static void rebuildRecent() {
+  s_recent.clear();
+  for (auto& n : s_recentNames) {
+    for (int i = 0; i < (int)s_profiles.size(); i++) {
+      if (s_profiles[i].name == n) { s_recent.push_back(i); break; }
     }
-    return true;
-  }
-
-  if (s_screen != Screen::Remote) return false;
-
-  if (x > kIconBrowseX && x < (kIconBrowseX + kIconSize)) {
-    openCategoryBrowser();
-    return true;
-  }
-  if (x > kIconReloadX && x < (kIconReloadX + kIconSize)) {
-    reloadUniversalProfiles();
-    return true;
-  }
-  return false;
-}
-
-static void rebuildCategoriesAndBrands() {
-  s_categories.clear();
-  s_brands.clear();
-  if (s_profiles.empty()) return;
-
-  auto addUnique = [](std::vector<String>& v, const String& s) {
-    for (auto& x : v) if (x == s) return;
-    v.push_back(s);
-  };
-
-  for (auto& p : s_profiles) {
-    addUnique(s_categories, p.category.length() ? p.category : String("OTHER"));
-  }
-  std::sort(s_categories.begin(), s_categories.end());
-  s_browseVersion++;
-}
-
-static void rebuildBrandsForCategory(const String& cat) {
-  s_brands.clear();
-  if (s_profiles.empty()) return;
-  auto addUnique = [](std::vector<String>& v, const String& s) {
-    for (auto& x : v) if (x == s) return;
-    v.push_back(s);
-  };
-  addUnique(s_brands, "ALL");
-  for (auto& p : s_profiles) {
-    if (p.category == cat) addUnique(s_brands, p.brand.length() ? p.brand : String("UNKNOWN"));
-  }
-  std::sort(s_brands.begin() + 1, s_brands.end());
-  s_browseVersion++;
-}
-
-static void rebuildFilteredProfiles() {
-  s_filteredProfileIdx.clear();
-  if (s_profiles.empty()) return;
-
-  for (int i = 0; i < (int)s_profiles.size(); i++) {
-    const Profile& p = s_profiles[i];
-    if (s_selectedCategory.length() && p.category != s_selectedCategory) continue;
-    if (s_selectedBrand.length() && s_selectedBrand != "ALL" && p.brand != s_selectedBrand) continue;
-    s_filteredProfileIdx.push_back(i);
-  }
-  s_browseVersion++;
-}
-
-static constexpr int LIST_ROW_H = 18;
-
-static int listTopY() { return kListY; }
-static int universalContentBottom() { return irContentBottom(); }
-static int listRowsVisible() {
-  int h = universalContentBottom() - listTopY() - 4;
-  int rows = h / LIST_ROW_H;
-  if (rows < 4) rows = 4;
-  if (rows > 10) rows = 10;
-  return rows;
-}
-
-static void drawListRow(int y, const String& left, const String& right, bool selected) {
-  uint16_t bg = selected ? UI_FG : FEATURE_BG;
-  uint16_t fg = selected ? UI_ICON : UI_TEXT;
-  tft.fillRect(kPadX, y, kListW, LIST_ROW_H - 1, bg);
-  tft.setTextFont(1);
-  tft.setTextColor(fg, bg);
-  tft.setCursor(kPadX, y + 4);
-  tft.print(truncateWithEllipsis(left, kListW - 4));
-  if (right.length()) {
-    int tw = tft.textWidth(right, 1);
-    tft.setCursor(kPadX + kListW - tw, y + 4);
-    tft.print(right);
+    if ((int)s_recent.size() >= 3) break;
   }
 }
 
-static void drawListScreen(const std::vector<String>& items) {
-  static Screen s_lastListScreen = Screen::Remote;
-  static int s_lastSel = -1;
-  static int s_lastPageStart = -1;
-  static uint32_t s_lastBrowseVersion = 0;
-
-  const int top = listTopY();
-  const int rows = listRowsVisible();
-  const int total = (int)items.size();
-  if (s_listSel < 0) s_listSel = 0;
-  if (total > 0 && s_listSel >= total) s_listSel = total - 1;
-
-  int pageStart = (rows > 0) ? ((s_listSel / rows) * rows) : 0;
-  const bool needFull =
-      (s_lastListScreen != s_screen) ||
-      (s_lastBrowseVersion != s_browseVersion) ||
-      (s_lastPageStart != pageStart) ||
-      (s_lastSel < 0);
-
-  if (needFull) {
-    tft.fillRect(0, listTopY(), 240, universalContentBottom() - listTopY(), FEATURE_BG);
-    for (int r = 0; r < rows; r++) {
-      int idx = pageStart + r;
-      if (idx >= total) break;
-      drawListRow(top + r * LIST_ROW_H, items[idx], "", idx == s_listSel);
-    }
-  } else {
-    int oldSel = s_lastSel;
-    int newSel = s_listSel;
-    int oldRow = oldSel - pageStart;
-    int newRow = newSel - pageStart;
-    if (oldRow >= 0 && oldRow < rows && oldSel >= 0 && oldSel < total) {
-      drawListRow(top + oldRow * LIST_ROW_H, items[oldSel], "", false);
-    }
-    if (newRow >= 0 && newRow < rows && newSel >= 0 && newSel < total) {
-      drawListRow(top + newRow * LIST_ROW_H, items[newSel], "", true);
-    }
-  }
-
-  s_lastListScreen = s_screen;
-  s_lastSel = s_listSel;
-  s_lastPageStart = pageStart;
-  s_lastBrowseVersion = s_browseVersion;
-}
-
-static int browseItemCount() {
-  if (s_screen == Screen::Category) return (int)s_categories.size();
-  if (s_screen == Screen::Brand) return (int)s_brands.size();
-  if (s_screen == Screen::Profile) return (int)s_filteredProfileIdx.size();
+static int firstSelectable() {
+  for (int i = 0; i < (int)s_rows.size(); i++) if (!s_rows[i].header) return i;
   return 0;
 }
 
-static std::vector<String> profileBrowseNames() {
-  std::vector<String> names;
-  names.reserve(s_filteredProfileIdx.size());
-  for (int idx : s_filteredProfileIdx) {
-    if (idx < 0 || idx >= (int)s_profiles.size()) continue;
-    names.push_back(s_profiles[idx].name);
+static void rebuildRows() {
+  s_rows.clear();
+  if (!s_recent.empty()) {
+    s_rows.push_back({ -1, true, "Recentes" });
+    for (int idx : s_recent) s_rows.push_back({ idx, false, nullptr });
+    s_rows.push_back({ -1, true, "Todos" });
   }
-  return names;
+  for (int idx : s_order) s_rows.push_back({ idx, false, nullptr });
+  if (s_sel < 0 || s_sel >= (int)s_rows.size() || s_rows[s_sel].header) s_sel = firstSelectable();
 }
 
-static void redrawBrowseListOnly() {
-  if (s_screen == Screen::Category) drawListScreen(s_categories);
-  else if (s_screen == Screen::Brand) drawListScreen(s_brands);
-  else if (s_screen == Screen::Profile) drawListScreen(profileBrowseNames());
+static void moveSel(int dir) {
+  int n = (int)s_rows.size();
+  if (n == 0) return;
+  int i = s_sel + dir;
+  while (i >= 0 && i < n && s_rows[i].header) i += dir;
+  if (i < 0 || i >= n) return;   // mantem se sairia da lista
+  s_sel = i;
 }
 
-static void bumpBrowseSelection(int delta) {
-  const int total = browseItemCount();
-  if (total <= 0) return;
-  s_listSel += delta;
-  if (s_listSel < 0) s_listSel = 0;
-  if (s_listSel >= total) s_listSel = total - 1;
-  redrawBrowseListOnly();
+static void ensureVisible() {
+  int rows = listRows();
+  if (s_sel < s_top) s_top = s_sel;
+  if (s_sel >= s_top + rows) s_top = s_sel - rows + 1;
+  if (s_top < 0) s_top = 0;
 }
 
-static void layoutKeyButtons() {
-  const int topY = kRemoteKeysTop;
-  const int bottomY = universalContentBottom() - 6;
-
-  const int gap = 6;
-  const int topBtnH = 34;
-  const int topBtnW = (kInfoBoxW - 2 * gap) / 3;
-  const int yTop = topY;
-  const int x0 = kInfoBoxX;
-  const int x1 = x0 + topBtnW + gap;
-  const int x2 = kInfoBoxRight - topBtnW;
-  s_keyBtns[(int)Power] = {(int16_t)x0,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Power),FeatureUI::ButtonStyle::Secondary,true};
-  s_keyBtns[(int)Mute]  = {(int16_t)x1,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Mute), FeatureUI::ButtonStyle::Secondary,true};
-  s_keyBtns[(int)Back]  = {(int16_t)x2,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Back), FeatureUI::ButtonStyle::Secondary,true};
-
-  const int yMidTop = yTop + topBtnH + 8;
-  const int midH = bottomY - yMidTop;
-  const int rockerW = 54;
-  const int rockerH = 72;
-  const int dpadSize = 92;
-  const int dpadX = (240 - dpadSize) / 2;
-  const int dpadY = yMidTop + (midH - dpadSize) / 2;
-
-  const int volX = kInfoBoxX;
-  const int chX = kInfoBoxRight - rockerW;
-  const int rockerY = yMidTop + (midH - rockerH) / 2;
-  s_keyBtns[(int)VolUp] = {(int16_t)volX,(int16_t)rockerY,(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(VolUp),FeatureUI::ButtonStyle::Secondary,true};
-  s_keyBtns[(int)VolDn] = {(int16_t)volX,(int16_t)(rockerY + rockerH/2 + 2),(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(VolDn),FeatureUI::ButtonStyle::Secondary,true};
-  s_keyBtns[(int)ChUp]  = {(int16_t)chX,(int16_t)rockerY,(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(ChUp),FeatureUI::ButtonStyle::Secondary,true};
-  s_keyBtns[(int)ChDn]  = {(int16_t)chX,(int16_t)(rockerY + rockerH/2 + 2),(int16_t)rockerW,(int16_t)(rockerH/2 - 2),keyLabel(ChDn),FeatureUI::ButtonStyle::Secondary,true};
-
-  const int unit = 28;
-  const int okSize = 38;
-  const int okX = dpadX + (dpadSize - okSize) / 2;
-  const int okY = dpadY + (dpadSize - okSize) / 2;
-  s_keyBtns[(int)Ok]    = {(int16_t)okX,(int16_t)okY,(int16_t)okSize,(int16_t)okSize,keyLabel(Ok),FeatureUI::ButtonStyle::Secondary,true};
-  s_keyBtns[(int)Up]    = {(int16_t)(dpadX + (dpadSize - unit)/2),(int16_t)dpadY,(int16_t)unit,(int16_t)unit,keyLabel(Up),FeatureUI::ButtonStyle::Secondary,true};
-  s_keyBtns[(int)Down]  = {(int16_t)(dpadX + (dpadSize - unit)/2),(int16_t)(dpadY + dpadSize - unit),(int16_t)unit,(int16_t)unit,keyLabel(Down),FeatureUI::ButtonStyle::Secondary,true};
-  s_keyBtns[(int)Left]  = {(int16_t)dpadX,(int16_t)(dpadY + (dpadSize - unit)/2),(int16_t)unit,(int16_t)unit,keyLabel(Left),FeatureUI::ButtonStyle::Secondary,true};
-  s_keyBtns[(int)Right] = {(int16_t)(dpadX + dpadSize - unit),(int16_t)(dpadY + (dpadSize - unit)/2),(int16_t)unit,(int16_t)unit,keyLabel(Right),FeatureUI::ButtonStyle::Secondary,true};
+// ---------- desenho ----------
+static void drawToolbar() {
+  tft.fillRect(0, kToolbarY, 240, kToolbarH, UI_FG);
+  tft.drawBitmap(kIconBackX, kToolbarY, bitmap_icon_go_back, kIconSize, kIconSize, UI_ICON);
+  if (s_screen != Screen::Details) {
+    tft.drawBitmap(kIconReloadX, kToolbarY, bitmap_icon_undo, kIconSize, kIconSize, UI_ICON);
+  }
+  tft.drawFastHLine(0, kToolbarBottom, 240, UI_LINE);
 }
 
-static void drawKeys() {
-  layoutKeyButtons();
-  tft.fillRect(0, kRemoteKeysTop, 240, universalContentBottom() - kRemoteKeysTop, FEATURE_BG);
+static void drawList() {
+  tft.fillRect(0, kBodyTop, 240, irContentBottom() - kBodyTop, FEATURE_BG);
+  tft.setTextFont(1);
+  tft.setTextSize(1);
 
-  if (s_profiles.empty()) {
-    tft.setTextFont(1);
-    tft.setTextColor(UI_TEXT, FEATURE_BG);
-    tft.setCursor(kPadX, kRemoteKeysTop + 12);
-    tft.print("Add SD profiles:");
-    tft.setCursor(kPadX, kRemoteKeysTop + 26);
-    tft.print("/ir_profiles.json");
-    tft.setCursor(kPadX, kRemoteKeysTop + 40);
-    tft.print("or /ir_profiles/*.json");
+  if (s_rows.empty()) {
+    tft.setTextColor(UI_WARN, FEATURE_BG);
+    tft.setCursor(kPadX, listTopY() + 4);
+    tft.print(s_lastErr.length() ? s_lastErr : "Sem controles");
     return;
   }
 
-  const Profile& p = s_profiles[s_profileIdx];
-  for (int i = 0; i < (int)KeyCount; i++) {
-    s_keyBtns[i].disabled = !p.has[i];
-  }
-  for (int i = 0; i < (int)KeyCount; i++) {
-    drawKeyButton((KeyId)i, false);
+  ensureVisible();
+  const int rows = listRows();
+  const int baseY = listTopY();
+  const int innerW = 240 - 2 * kPadX;
+
+  for (int r = 0; r < rows; r++) {
+    const int ri = s_top + r;
+    if (ri >= (int)s_rows.size()) break;
+    const ListRow& row = s_rows[ri];
+    const int ry = baseY + r * LIST_ROW_H;
+
+    if (row.header) {
+      tft.setTextColor(UI_ICON, FEATURE_BG);
+      tft.setCursor(kPadX, ry + 6);
+      tft.print(row.label);
+      tft.drawFastHLine(kPadX, ry + LIST_ROW_H - 2, innerW, UI_LINE);
+      continue;
+    }
+
+    const Profile& p = s_profiles[row.profileIdx];
+    const bool sel = (ri == s_sel);
+    const uint16_t bg = sel ? UI_FG : FEATURE_BG;
+    const uint16_t fg = sel ? UI_ICON : UI_TEXT;
+    tft.fillRect(kPadX, ry, innerW, LIST_ROW_H - 1, bg);
+
+    const char* tag = p.fromSd ? "SD" : "BI";
+    const int tagW = tft.textWidth(tag, 1);
+    tft.setTextColor(p.fromSd ? UI_OK : UI_DIM_TEXT, bg);
+    tft.setCursor(kPadX + innerW - tagW - 2, ry + 6);
+    tft.print(tag);
+
+    tft.setTextColor(fg, bg);
+    tft.setCursor(kPadX + 4, ry + 6);
+    tft.print(truncateWithEllipsis(p.name, innerW - tagW - 14));
   }
 }
 
+static void drawDetails() {
+  tft.fillRect(0, kBodyTop, 240, irContentBottom() - kBodyTop, FEATURE_BG);
+  if (s_selProfile < 0 || s_selProfile >= (int)s_profiles.size()) return;
+  const Profile& p = s_profiles[s_selProfile];
+
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  int y = kBodyTop + 8;
+  const int step = 18;
+  const int valX = kPadX + 72;
+
+  auto line = [&](const char* label, const String& val, uint16_t vc) {
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+    tft.setCursor(kPadX, y);
+    tft.print(label);
+    tft.setTextColor(vc, FEATURE_BG);
+    tft.setCursor(valX, y);
+    tft.print(truncateWithEllipsis(val.length() ? val : String("-"), 240 - valX - kPadX));
+    y += step;
+  };
+
+  int nk = 0;
+  for (int i = 0; i < (int)KeyCount; i++) if (p.has[i]) nk++;
+
+  line("Nome:",      p.name, UI_TEXT);
+  line("Modelo:",    p.model, UI_TEXT);
+  line("Marca:",     p.brand, UI_TEXT);
+  line("Tipo:",      p.category, UI_TEXT);
+  line("Protocolo:", String(typeToString(p.proto)), UI_TEXT);
+  line("Bits:",      String((unsigned)p.bits), UI_TEXT);
+  line("Fonte:",     p.fromSd ? String("SD card") : String("Built-in"), p.fromSd ? UI_OK : UI_DIM_TEXT);
+  line("Teclas:",    String(nk) + "/" + String((int)KeyCount), UI_TEXT);
+}
+
+static void layoutKeyButtons() {
+  const int top = kBodyTop + 20;
+  const int bottom = irContentBottom() - 6;
+  const int gap = 6;
+  const int areaX = kInfoBoxX;
+  const int areaW = kInfoBoxW;
+
+  // Linha de cima: PWR | HOME | BACK
+  const int topBtnH = 32;
+  const int topBtnW = (areaW - 2 * gap) / 3;
+  const int yTop = top;
+  const int x0 = areaX;
+  const int x1 = x0 + topBtnW + gap;
+  const int x2 = areaX + areaW - topBtnW;
+  s_keyBtns[(int)Power] = { (int16_t)x0,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Power),FeatureUI::ButtonStyle::Secondary,true };
+  s_keyBtns[(int)Home]  = { (int16_t)x1,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Home), FeatureUI::ButtonStyle::Secondary,true };
+  s_keyBtns[(int)Back]  = { (int16_t)x2,(int16_t)yTop,(int16_t)topBtnW,(int16_t)topBtnH,keyLabel(Back), FeatureUI::ButtonStyle::Secondary,true };
+
+  // Regiao do meio: rockers (3 segmentos) + d-pad
+  const int yMid = yTop + topBtnH + 10;
+  const int midH = bottom - yMid;
+  const int rockerW = 52;
+  int rockerH = midH;
+  if (rockerH > 132) rockerH = 132;
+  const int segGap = 4;
+  const int segH = (rockerH - 2 * segGap) / 3;
+  const int ry = yMid + (midH - rockerH) / 2;
+
+  const int volX = areaX;
+  const int chX  = areaX + areaW - rockerW;
+
+  // Volume: VOL+ / MUTE / VOL-
+  s_keyBtns[(int)VolUp] = { (int16_t)volX,(int16_t)ry,                      (int16_t)rockerW,(int16_t)segH,keyLabel(VolUp),FeatureUI::ButtonStyle::Secondary,true };
+  s_keyBtns[(int)Mute]  = { (int16_t)volX,(int16_t)(ry + segH + segGap),    (int16_t)rockerW,(int16_t)segH,keyLabel(Mute), FeatureUI::ButtonStyle::Secondary,true };
+  s_keyBtns[(int)VolDn] = { (int16_t)volX,(int16_t)(ry + 2*(segH + segGap)),(int16_t)rockerW,(int16_t)segH,keyLabel(VolDn),FeatureUI::ButtonStyle::Secondary,true };
+
+  // Canal: CH+ / GUIDE / CH-
+  s_keyBtns[(int)ChUp]  = { (int16_t)chX,(int16_t)ry,                       (int16_t)rockerW,(int16_t)segH,keyLabel(ChUp), FeatureUI::ButtonStyle::Secondary,true };
+  s_keyBtns[(int)Guide] = { (int16_t)chX,(int16_t)(ry + segH + segGap),     (int16_t)rockerW,(int16_t)segH,keyLabel(Guide),FeatureUI::ButtonStyle::Secondary,true };
+  s_keyBtns[(int)ChDn]  = { (int16_t)chX,(int16_t)(ry + 2*(segH + segGap)), (int16_t)rockerW,(int16_t)segH,keyLabel(ChDn), FeatureUI::ButtonStyle::Secondary,true };
+
+  // D-pad central
+  const int dpadSize = 96;
+  const int dpadX = (240 - dpadSize) / 2;
+  const int dpadY = yMid + (midH - dpadSize) / 2;
+  const int unit = 30;
+  const int okSize = 40;
+  const int okX = dpadX + (dpadSize - okSize) / 2;
+  const int okY = dpadY + (dpadSize - okSize) / 2;
+  s_keyBtns[(int)Ok]    = { (int16_t)okX,(int16_t)okY,(int16_t)okSize,(int16_t)okSize,keyLabel(Ok),FeatureUI::ButtonStyle::Secondary,true };
+  s_keyBtns[(int)Up]    = { (int16_t)(dpadX + (dpadSize - unit)/2),(int16_t)dpadY,(int16_t)unit,(int16_t)unit,keyLabel(Up),FeatureUI::ButtonStyle::Secondary,true };
+  s_keyBtns[(int)Down]  = { (int16_t)(dpadX + (dpadSize - unit)/2),(int16_t)(dpadY + dpadSize - unit),(int16_t)unit,(int16_t)unit,keyLabel(Down),FeatureUI::ButtonStyle::Secondary,true };
+  s_keyBtns[(int)Left]  = { (int16_t)dpadX,(int16_t)(dpadY + (dpadSize - unit)/2),(int16_t)unit,(int16_t)unit,keyLabel(Left),FeatureUI::ButtonStyle::Secondary,true };
+  s_keyBtns[(int)Right] = { (int16_t)(dpadX + dpadSize - unit),(int16_t)(dpadY + (dpadSize - unit)/2),(int16_t)unit,(int16_t)unit,keyLabel(Right),FeatureUI::ButtonStyle::Secondary,true };
+}
+
+static void drawControl() {
+  tft.fillRect(0, kBodyTop, 240, irContentBottom() - kBodyTop, FEATURE_BG);
+  if (s_profileIdx < 0 || s_profileIdx >= (int)s_profiles.size()) return;
+  const Profile& p = s_profiles[s_profileIdx];
+
+  // Titulo (nome do controle)
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_ICON, FEATURE_BG);
+  tft.setCursor(kPadX, kBodyTop + 5);
+  tft.print(truncateWithEllipsis(p.name, 240 - 2 * kPadX));
+
+  layoutKeyButtons();
+  for (int i = 0; i < (int)KeyCount; i++) s_keyBtns[i].disabled = !p.has[i];
+  for (int i = 0; i < (int)KeyCount; i++) drawKeyButton((KeyId)i, i == s_navSel);
+}
+
 static void drawFooter() {
-  if (s_screen == Screen::Remote) {
-    irSetUniversalRemoteNavLabels();
-  } else {
-    irSetUniversalBrowseNavLabels();
-  }
+  if (s_screen == Screen::List)
+    setTouchNavLabels("Voltar", "Baixo", "Load", "Cima", "Detalhes");
+  else if (s_screen == Screen::Details)
+    setTouchNavLabels("Voltar", "", "", "", "");
+  else
+    setTouchNavLabels("Voltar", "", "OK", "", "");
   irRedrawNavChrome();
 }
 
 static void drawAll() {
   irClearBody(FEATURE_BG);
-  float v = readBatteryVoltage();
-  drawStatusBar(v, true);
+  drawStatusBar(readBatteryVoltage(), true);
   drawToolbar();
-
-  if (s_screen == Screen::Remote) {
-    drawInfoPanel();
-    drawKeys();
-    drawFooter();
-    s_uiDrawn = true;
-    return;
-  }
-
-  drawBrowseHeader();
-  redrawBrowseListOnly();
+  if (s_screen == Screen::List)         drawList();
+  else if (s_screen == Screen::Details) drawDetails();
+  else                                  drawControl();
   drawFooter();
   s_uiDrawn = true;
 }
 
+// ---------- acoes ----------
 static void sendKey(KeyId k) {
   if (s_profiles.empty()) return;
+  if (s_profileIdx < 0 || s_profileIdx >= (int)s_profiles.size()) return;
   const Profile& p = s_profiles[s_profileIdx];
-  if (!p.has[k]) {
-    showNotification("IR", "Key not available in this profile");
-    return;
-  }
-
+  if (!p.has[k]) { showNotification("IR", "Tecla nao disponivel neste controle"); return; }
   s_send.begin();
   uint16_t repeat = 0;
   if (p.proto == decode_type_t::SONY || p.proto == decode_type_t::SONY_38K) repeat = 2;
-
-  if (!s_send.send(p.proto, p.code[k], p.bits, repeat)) {
-    showNotification("IR", "Protocol not enabled in build");
-  }
+  if (!s_send.send(p.proto, p.code[k], p.bits, repeat))
+    showNotification("IR", "Protocolo nao habilitado no build");
 }
 
-static void changeProfile(int delta) {
-  if (s_profiles.empty()) return;
-  int n = (int)s_profiles.size();
-  s_profileIdx = (s_profileIdx + delta) % n;
-  if (s_profileIdx < 0) s_profileIdx += n;
-  drawInfoPanel();
-  drawKeys();
-}
-
-static void openCategoryBrowser() {
-  s_screen = Screen::Category;
-  s_listSel = 0;
-  rebuildCategoriesAndBrands();
-  s_uiDrawn = false;
-}
-
-static void reloadUniversalProfiles() {
+static void doReload() {
   refreshProfiles();
-  rebuildCategoriesAndBrands();
+  rebuildOrder();
+  rebuildRecent();
+  rebuildRows();
+  s_top = 0;
   s_uiDrawn = false;
 }
 
-static void browseBack() {
-  if (s_screen == Screen::Category) s_screen = Screen::Remote;
-  else if (s_screen == Screen::Brand) s_screen = Screen::Category;
-  else if (s_screen == Screen::Profile) s_screen = Screen::Brand;
+static void goList() {
+  s_screen = Screen::List;
   s_uiDrawn = false;
 }
 
-static void browseSelect() {
-  if (s_screen == Screen::Category) {
-    if (s_categories.empty()) return;
-    s_selectedCategory = s_categories[std::max(0, std::min(s_listSel, (int)s_categories.size() - 1))];
-    rebuildBrandsForCategory(s_selectedCategory);
-    s_screen = Screen::Brand;
-    s_listSel = 0;
-    s_uiDrawn = false;
-  } else if (s_screen == Screen::Brand) {
-    if (s_brands.empty()) return;
-    s_selectedBrand = s_brands[std::max(0, std::min(s_listSel, (int)s_brands.size() - 1))];
-    rebuildFilteredProfiles();
-    s_screen = Screen::Profile;
-    s_listSel = 0;
-    s_uiDrawn = false;
-  } else if (s_screen == Screen::Profile) {
-    if (s_filteredProfileIdx.empty()) return;
-    int idx = s_filteredProfileIdx[std::max(0, std::min(s_listSel, (int)s_filteredProfileIdx.size() - 1))];
-    if (idx >= 0 && idx < (int)s_profiles.size()) {
-      s_profileIdx = idx;
-      s_screen = Screen::Remote;
-      s_uiDrawn = false;
-    }
-  }
+static void openDetails() {
+  if (s_rows.empty()) return;
+  const ListRow& row = s_rows[s_sel];
+  if (row.header || row.profileIdx < 0) return;
+  s_selProfile = row.profileIdx;
+  s_screen = Screen::Details;
+  s_uiDrawn = false;
 }
 
-static void handleUniversalNavButtons() {
-  if (!featureHasTouchNavBar()) {
-    return;
-  }
+static void loadSelected() {
+  if (s_rows.empty()) return;
+  const ListRow& row = s_rows[s_sel];
+  if (row.header || row.profileIdx < 0) return;
+  s_profileIdx = row.profileIdx;
+  pushRecent(s_profiles[s_profileIdx].name);
+  rebuildRecent();
+  rebuildRows();
+  s_navSel = 0;
+  for (int i = 0; i < (int)KeyCount; i++)
+    if (s_profiles[s_profileIdx].has[i]) { s_navSel = i; break; }
+  s_screen = Screen::Control;
+  s_uiDrawn = false;
+}
 
-  if (s_screen == Screen::Remote) {
-    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
-      changeProfile(-1);
-    }
-    if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
-      openCategoryBrowser();
-    }
-    if (isTouchNavButtonPressedEdge(BTN_UP)) {
-      reloadUniversalProfiles();
-    }
-    if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
-      changeProfile(+1);
-    }
-    return;
-  }
+static void ctrlGo(int ni) {
+  if (ni < 0 || ni == s_navSel) return;
+  const int o = s_navSel;
+  s_navSel = ni;
+  drawKeyButton((KeyId)o, false);
+  drawKeyButton((KeyId)s_navSel, true);
+}
 
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
-    browseBack();
+// Adjacencias fixas do controle da TV (dir: 0=cima,1=baixo,2=esq,3=dir).
+// Retorna a tecla alvo, ou -1 para usar a navegacao generica.
+static int tvNavTarget(KeyId k, int dir) {
+  switch (k) {
+    case VolUp: if (dir == 1) return Mute;  if (dir == 3) return Left;  break;
+    case Mute:  if (dir == 1) return VolDn; if (dir == 0) return VolUp; if (dir == 3) return Left;  break;
+    case VolDn: if (dir == 0) return Mute;  if (dir == 3) return Left;  break;
+    case ChUp:  if (dir == 1) return Guide; if (dir == 2) return Right; break;
+    case Guide: if (dir == 1) return ChDn;  if (dir == 0) return ChUp;  if (dir == 2) return Right; break;
+    case ChDn:  if (dir == 0) return Guide; if (dir == 2) return Right; break;
+    case Up:    if (dir == 0) return Home; if (dir == 1) return Ok;   if (dir == 2) return Left; if (dir == 3) return Right; break;
+    case Down:  if (dir == 0) return Ok;   if (dir == 1) return Down; if (dir == 2) return Left; if (dir == 3) return Right; break;
+    default: break;
   }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
-    bumpBrowseSelection(1);
+  return -1;
+}
+
+static void ctrlNav(int dir) {
+  int t = tvNavTarget((KeyId)s_navSel, dir);
+  if (t < 0 || s_keyBtns[t].disabled) t = irNavSelect(s_keyBtns, (int)KeyCount, s_navSel, dir);
+  ctrlGo(t);
+}
+
+static void goList();
+static void ctrlLeft() {
+  int t = tvNavTarget((KeyId)s_navSel, 2);
+  if (t >= 0 && !s_keyBtns[t].disabled) { ctrlGo(t); return; }
+  const int ni = irNavSelect(s_keyBtns, (int)KeyCount, s_navSel, 2);
+  if (ni != s_navSel) { ctrlGo(ni); return; }
+  if (irIsLeftEdge(s_keyBtns, (int)KeyCount, s_navSel)) goList();  // so volta na coluna mais a esq
+}
+
+static void ctrlActivate() {
+  if (s_navSel < 0 || s_navSel >= (int)KeyCount) return;
+  if (s_keyBtns[s_navSel].disabled) return;
+  sendKey((KeyId)s_navSel);
+}
+
+static bool handleToolbarTouch(int x, int y) {
+  if (y <= kToolbarY || y >= kToolbarBottom) return false;
+  if (x > kIconBackX && x < kIconBackX + kIconSize) {
+    if (s_screen == Screen::List) feature_exit_requested = true;
+    else goList();
+    return true;
   }
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
-    bumpBrowseSelection(-1);
+  if (s_screen != Screen::Details && x > kIconReloadX && x < kIconReloadX + kIconSize) {
+    doReload();
+    return true;
   }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
-    browseSelect();
-  }
+  return false;
 }
 
 void setup() {
   setTouchButtonInputEnabled(true);
-  irSetUniversalRemoteNavLabels();
   s_send.begin();
+  s_screen = Screen::List;
   s_profileIdx = 0;
   s_uiDrawn = false;
-  s_screen = Screen::Remote;
+  loadRecentNames();
   refreshProfiles();
-  rebuildCategoriesAndBrands();
+  rebuildOrder();
+  rebuildRecent();
+  rebuildRows();
+  s_sel = firstSelectable();
+  s_top = 0;
   drawAll();
 }
 
 void loop() {
-  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
-    feature_exit_requested = true;
+  if (feature_active && feature_exit_requested) {
     return;
   }
 
   if (!s_uiDrawn) drawAll();
   maintainTouchNavBar();
-  handleUniversalNavButtons();
 
-  const uint32_t now = millis();
-  static uint32_t lastBtnMs = 0;
-  static bool prevLeft = false, prevRight = false, prevUp = false, prevDown = false;
-  const bool leftNow  = isPhysicalButtonPressed(BTN_LEFT);
-  const bool rightNow = isPhysicalButtonPressed(BTN_RIGHT);
-  const bool upNow    = isPhysicalButtonPressed(BTN_UP);
-  const bool downNow  = isPhysicalButtonPressed(BTN_DOWN);
-  constexpr uint32_t kBtnDebounceMs = 320;
-  if ((uint32_t)(now - lastBtnMs) > kBtnDebounceMs) {
-    if (s_screen == Screen::Remote) {
-      if (leftNow && !prevLeft) { changeProfile(-1); lastBtnMs = now; }
-      else if (rightNow && !prevRight) { changeProfile(+1); lastBtnMs = now; }
-      else if (upNow && !prevUp) { sendKey(VolUp); lastBtnMs = now; }
-      else if (downNow && !prevDown) { sendKey(VolDn); lastBtnMs = now; }
-    } else {
-      if (upNow && !prevUp) { bumpBrowseSelection(-1); lastBtnMs = now; }
-      else if (downNow && !prevDown) { bumpBrowseSelection(1); lastBtnMs = now; }
-      else if (leftNow && !prevLeft) {
-        if (s_screen == Screen::Category) { s_screen = Screen::Remote; }
-        else if (s_screen == Screen::Brand) { s_screen = Screen::Category; }
-        else if (s_screen == Screen::Profile) { s_screen = Screen::Brand; }
-        s_uiDrawn = false; lastBtnMs = now;
-      } else if (rightNow && !prevRight) {
-        if (s_screen == Screen::Category) {
-          if (!s_categories.empty()) {
-            s_selectedCategory = s_categories[std::max(0, std::min(s_listSel, (int)s_categories.size()-1))];
-            rebuildBrandsForCategory(s_selectedCategory);
-            s_screen = Screen::Brand;
-            s_listSel = 0;
-            s_uiDrawn = false;
-            lastBtnMs = now;
-          }
-        } else if (s_screen == Screen::Brand) {
-          if (!s_brands.empty()) {
-            s_selectedBrand = s_brands[std::max(0, std::min(s_listSel, (int)s_brands.size()-1))];
-            rebuildFilteredProfiles();
-            s_screen = Screen::Profile;
-            s_listSel = 0;
-            s_uiDrawn = false;
-            lastBtnMs = now;
-          }
-        } else if (s_screen == Screen::Profile) {
-          if (!s_filteredProfileIdx.empty()) {
-            int idx = s_filteredProfileIdx[std::max(0, std::min(s_listSel, (int)s_filteredProfileIdx.size()-1))];
-            if (idx >= 0 && idx < (int)s_profiles.size()) {
-              s_profileIdx = idx;
-              s_screen = Screen::Remote;
-              s_uiDrawn = false;
-              lastBtnMs = now;
-            }
-          }
-        }
-      }
+  if (s_screen == Screen::List) {
+    if (isButtonPressedEdge(BTN_UP))     { moveSel(-1); drawList(); }
+    if (isButtonPressedEdge(BTN_DOWN))   { moveSel(+1); drawList(); }
+    if (isButtonPressedEdge(BTN_LEFT))   { feature_exit_requested = true; }   // volta/sai
+    if (isButtonPressedEdge(BTN_RIGHT))  { openDetails(); }
+    if (isButtonPressedEdge(BTN_SELECT)) { loadSelected(); }                  // meio = Load
+  } else if (s_screen == Screen::Details) {
+    if (isButtonPressedEdge(BTN_LEFT))   { goList(); }
+  } else { // Control: setas movem (espacial); esq no canto = Voltar; meio aciona
+    const bool nUp = isButtonPressedEdge(BTN_UP);
+    const bool nDn = isButtonPressedEdge(BTN_DOWN);
+    const bool nRt = isButtonPressedEdge(BTN_RIGHT);
+    const bool nLf = isButtonPressedEdge(BTN_LEFT);
+    const bool nOk = isButtonPressedEdge(BTN_SELECT);
+    static uint32_t lastNavMs = 0;
+    const uint32_t nowNav = millis();
+    if ((uint32_t)(nowNav - lastNavMs) > 160) {   // anti-bounce (1 acao por toque)
+      if      (nUp) { ctrlNav(0);     lastNavMs = nowNav; }
+      else if (nDn) { ctrlNav(1);     lastNavMs = nowNav; }
+      else if (nRt) { ctrlNav(3);     lastNavMs = nowNav; }
+      else if (nLf) { ctrlLeft();     lastNavMs = nowNav; }
+      else if (nOk) { ctrlActivate(); lastNavMs = nowNav; }
     }
   }
-  prevLeft = leftNow;
-  prevRight = rightNow;
-  prevUp = upNow;
-  prevDown = downNow;
 
+  // Toque na tela
   static uint32_t lastTouchMs = 0;
-  static bool touchWasDown = false;
+  static bool touchWas = false;
+  const uint32_t now = millis();
   const bool touchNow = isTouchDownDismiss();
-  constexpr uint32_t kTouchDebounceMs = 320;
-  if (touchNow && !touchWasDown) {
+  constexpr uint32_t kTouchDebounceMs = 280;
+  if (touchNow && !touchWas) {
     int x, y;
-    touchWasDown = true;
+    touchWas = true;
     if (!readTouchXY(x, y)) return;
     if ((uint32_t)(now - lastTouchMs) < kTouchDebounceMs) return;
     lastTouchMs = now;
 
     if (handleToolbarTouch(x, y)) return;
 
-    if (s_screen == Screen::Remote) {
-      int k = FeatureUI::hit(s_keyBtns, (int)KeyCount, x, y);
-      if (k >= 0) {
-        if (!s_keyBtns[k].disabled) {
-          drawKeyButton((KeyId)k, true);
-          sendKey((KeyId)k);
-          drawKeyButton((KeyId)k, false);
+    if (s_screen == Screen::List) {
+      const int rows = listRows();
+      const int ty = listTopY();
+      if (y >= ty && y < ty + rows * LIST_ROW_H) {
+        const int ri = s_top + (y - ty) / LIST_ROW_H;
+        if (ri >= 0 && ri < (int)s_rows.size() && !s_rows[ri].header) {
+          if (ri == s_sel) loadSelected();           // tocar de novo na selecionada = Load
+          else { s_sel = ri; drawList(); }
         }
-        return;
       }
-    } else {
-
-      const int top = listTopY();
-      const int rows = listRowsVisible();
-      if (y >= top && y < top + rows * LIST_ROW_H) {
-        int row = (y - top) / LIST_ROW_H;
-        int pageStart = (rows > 0) ? ((s_listSel / rows) * rows) : 0;
-        int idx = pageStart + row;
-        int max = 0;
-        if (s_screen == Screen::Category) max = (int)s_categories.size();
-        else if (s_screen == Screen::Brand) max = (int)s_brands.size();
-        else if (s_screen == Screen::Profile) max = (int)s_filteredProfileIdx.size();
-        if (idx >= 0 && idx < max) {
-          s_listSel = idx;
-          redrawBrowseListOnly();
-          return;
-        }
+    } else if (s_screen == Screen::Control) {
+      const int k = FeatureUI::hit(s_keyBtns, (int)KeyCount, x, y);
+      if (k >= 0 && !s_keyBtns[k].disabled) {
+        if (s_navSel != k) { drawKeyButton((KeyId)s_navSel, false); s_navSel = k; }
+        drawKeyButton((KeyId)k, true);
+        sendKey((KeyId)k);
       }
     }
   }
-
-  if (!touchNow) touchWasDown = false;
+  if (!touchNow) touchWas = false;
 
   delay(10);
+}
+
+}  // namespace IRUniversalController
+
+
+// ============================================================================
+// Universal Controller A/C - mesmo fluxo (Lista -> Detalhes | Controle),
+// mas state-based. Por enquanto so LG (via IRLgAc); estrutura pronta p/ SD.
+// ============================================================================
+namespace IRUniversalAC {
+
+static constexpr const char* AC_DIR    = "/ir_ac";
+static constexpr const char* AC_RECENT = "/ir_ac/recent.txt";
+
+static constexpr int16_t kToolbarY = 20;
+static constexpr int16_t kToolbarH = 16;
+static constexpr int16_t kIconSize = 16;
+static constexpr int kToolbarBottom = kToolbarY + kToolbarH;  // 36
+static constexpr int kBodyTop = kToolbarBottom + 1;           // 37
+static constexpr int kPadX = 10;
+static constexpr int kIconBackX = 10;
+static constexpr int kIconReloadX = 210;
+static constexpr int LIST_ROW_H = 20;
+
+static IRLgAc s_lg(IR_TX_PIN);
+static IRsend s_rawSend(IR_TX_PIN);   // p/ comandos diretos (swing por posicao, luz)
+static int s_swingIdx = -1;           // -1 = nenhuma posicao enviada ainda
+
+static uint32_t parseHex32(const char* s) {
+  if (!s) return 0;
+  String t(s); t.trim();
+  if (t.startsWith("0x") || t.startsWith("0X")) return (uint32_t)strtoul(t.c_str() + 2, nullptr, 16);
+  return (uint32_t)strtoul(t.c_str(), nullptr, 16);
+}
+static decode_type_t protoFromStr(const String& s, decode_type_t def) {
+  String u = s; u.toUpperCase();
+  if (u == "LG")  return decode_type_t::LG;
+  if (u == "LG2") return decode_type_t::LG2;
+  return def;
+}
+
+// ---------- modelos LG ----------
+static const lg_ac_remote_model_t kLgModels[] = {
+  AKB75215403, AKB74955603, AKB73757604, GE6711AR2853M, LG6711A20083V
+};
+static constexpr int kLgModelCount = sizeof(kLgModels) / sizeof(kLgModels[0]);
+
+static const char* lgModelName(lg_ac_remote_model_t m) {
+  switch (m) {
+    case AKB75215403:   return "AKB75215403";
+    case AKB74955603:   return "AKB74955603";
+    case AKB73757604:   return "AKB73757604";
+    case GE6711AR2853M: return "GE6711AR2853M";
+    case LG6711A20083V: return "LG6711A20083V";
+    default:            return "AKB75215403";
   }
 }
+
+static lg_ac_remote_model_t lgModelFromString(const String& in) {
+  String s = in; s.toUpperCase();
+  if (s.indexOf("GE6711") >= 0)   return GE6711AR2853M;
+  if (s.indexOf("20083") >= 0)    return LG6711A20083V;
+  if (s.indexOf("74955603") >= 0) return AKB74955603;
+  if (s.indexOf("73757604") >= 0) return AKB73757604;
+  if (s.indexOf("75215403") >= 0) return AKB75215403;
+  return AKB75215403;  // default (inclui o AKB75215424 do usuario)
+}
+
+static const char* lgProtoName(lg_ac_remote_model_t m) {
+  return (m == GE6711AR2853M || m == LG6711A20083V) ? "LG" : "LG2";
+}
+
+// ---------- perfis ----------
+struct AcProfile {
+  String name;
+  String brand;
+  String model;
+  bool fromSd = false;
+  lg_ac_remote_model_t lgModel = AKB75215403;
+  std::vector<uint32_t> swingCodes;               // posicoes da aba, em ordem
+  decode_type_t swingProto = decode_type_t::LG2;  // protocolo p/ enviar swing
+  uint32_t lightCode = 0x88C00A6;                 // toggle da luz do display
+  decode_type_t lightProto = decode_type_t::LG2;
+};
+
+// Preenche codigos padrao (da biblioteca) de swing/luz; o SD pode sobrescrever.
+static void setAcDefaults(AcProfile& p) {
+  static const uint32_t def[] = {
+    kLgAcSwingVLowest, kLgAcSwingVLow, kLgAcSwingVMiddle,
+    kLgAcSwingVUpperMiddle, kLgAcSwingVHigh, kLgAcSwingVHighest,
+    kLgAcSwingVSwing, kLgAcSwingVOff
+  };
+  p.swingCodes.assign(def, def + (sizeof(def) / sizeof(def[0])));
+  p.swingProto = decode_type_t::LG2;
+  p.lightCode = kLgAcLightToggle;
+  p.lightProto = decode_type_t::LG2;
+}
+static std::vector<AcProfile> s_profs;
+static int s_profIdx = 0;
+static int s_sdCount = 0;
+static bool s_loadedSd = false;
+static String s_lastErr;
+
+static void loadBuiltinAc() {
+  auto add = [&](const char* n, const char* model) {
+    AcProfile p;
+    p.name = n; p.brand = "LG"; p.model = model; p.fromSd = false;
+    p.lgModel = lgModelFromString(model);
+    setAcDefaults(p);
+    s_profs.push_back(p);
+  };
+  add("LG Dual Inverter",        "AKB75215403");
+  add("LG (AKB75215403)",        "AKB75215403");
+  add("LG (AKB74955603)",        "AKB74955603");
+  add("LG (AKB73757604)",        "AKB73757604");
+  add("LG (GE6711AR2853M)",      "GE6711AR2853M");
+  add("LG (LG6711A20083V)",      "LG6711A20083V");
+}
+
+static bool loadAcFromSd() {
+  s_sdCount = 0;
+  if (!isSDCardAvailable()) return false;
+  if (!SD.exists(AC_DIR)) return false;
+  File d = SD.open(AC_DIR);
+  if (!d) return false;
+  for (;;) {
+    File f = d.openNextFile();
+    if (!f) break;
+    if (!f.isDirectory()) {
+      String name = String(f.name());
+      if (name.endsWith(".json")) {
+        DynamicJsonDocument doc(2048);
+        if (!deserializeJson(doc, f)) {
+          JsonObject o = doc.as<JsonObject>();
+          String brand = String((const char*)(o["brand"] | ""));
+          brand.toUpperCase();
+          if (brand.length() == 0 || brand == "LG") {  // so LG por enquanto
+            AcProfile p;
+            p.name  = String((const char*)(o["name"]  | ""));
+            p.brand = "LG";
+            p.model = String((const char*)(o["model"] | "AKB75215403"));
+            p.fromSd = true;
+            p.lgModel = lgModelFromString(p.model);
+            if (!p.name.length()) p.name = String("LG ") + p.model;
+            setAcDefaults(p);
+            p.swingProto = protoFromStr(String((const char*)(o["swing_proto"] | "")), p.swingProto);
+            p.lightProto = protoFromStr(String((const char*)(o["light_proto"] | "")), p.lightProto);
+            if (o.containsKey("light")) { uint32_t lc = parseHex32(o["light"] | ""); if (lc) p.lightCode = lc; }
+            JsonArray sw = o["swing"].as<JsonArray>();
+            if (!sw.isNull()) {
+              std::vector<uint32_t> codes;
+              for (JsonVariant v : sw) { uint32_t c = parseHex32(v.as<const char*>()); if (c) codes.push_back(c); }
+              if (!codes.empty()) p.swingCodes = codes;
+            }
+            s_profs.push_back(p);
+            s_sdCount++;
+          }
+        }
+      }
+    }
+    f.close();
+    if ((int)s_profs.size() >= 200) break;
+  }
+  d.close();
+  return s_sdCount > 0;
+}
+
+static void refreshAc() {
+  s_profs.clear();
+  loadBuiltinAc();
+  s_loadedSd = loadAcFromSd();
+  s_lastErr = s_loadedSd ? (String(s_sdCount) + " do SD") : String("SD: nenhum");
+  if (s_profIdx < 0 || s_profIdx >= (int)s_profs.size()) s_profIdx = 0;
+}
+
+// ---------- estado do A/C ----------
+struct AcState {
+  bool power = false;
+  uint8_t mode = kLgAcCool;
+  uint8_t temp = 22;
+  uint8_t fan = kLgAcFanAuto;
+  bool swingV = false;
+  bool light = true;
+};
+static AcState s_st;
+
+static const uint8_t kFanCycle[] = { kLgAcFanAuto, kLgAcFanLow, kLgAcFanMedium, kLgAcFanMax };
+static constexpr int kFanCycleCount = sizeof(kFanCycle) / sizeof(kFanCycle[0]);
+
+static const char* fanName(uint8_t f) {
+  switch (f) {
+    case kLgAcFanAuto:   return "Auto";
+    case kLgAcFanLow:    return "Low";
+    case kLgAcFanMedium: return "Med";
+    case kLgAcFanMax:    return "Max";
+    case kLgAcFanLowest: return "Min";
+    case kLgAcFanHigh:   return "High";
+    default:             return "?";
+  }
+}
+static const char* modeName(uint8_t m) {
+  switch (m) {
+    case kLgAcCool: return "Cool";
+    case kLgAcDry:  return "Dry";
+    case kLgAcFan:  return "Fan";
+    case kLgAcAuto: return "Auto";
+    case kLgAcHeat: return "Heat";
+    default:        return "?";
+  }
+}
+
+static void acApplyAndSend() {
+  if (s_profs.empty()) return;
+  const AcProfile& p = s_profs[s_profIdx];
+  s_lg.setModel(p.lgModel);
+  s_lg.setPower(s_st.power);
+  s_lg.setMode(s_st.mode);
+  s_lg.setTemp(s_st.temp);
+  s_lg.setFan(s_st.fan);
+  // Swing e luz sao enviados por comando direto (ver acButton), nao aqui.
+  s_lg.send();
+}
+
+// ---------- botoes do controle ----------
+enum AcBtn { B_PWR, B_MODE, B_TEMPUP, B_TEMPDN, B_SWING, B_SPEED, B_LIGHT, B_COUNT };
+static FeatureUI::Button s_btn[B_COUNT];
+
+static void acButton(int b) {
+  switch (b) {
+    case B_PWR:    s_st.power = !s_st.power; break;
+    case B_MODE:   s_st.power = true; s_st.mode = (uint8_t)((s_st.mode + 1) % 5); break;
+    case B_TEMPUP: s_st.power = true; if (s_st.temp < kLgAcMaxTemp) s_st.temp++; break;
+    case B_TEMPDN: s_st.power = true; if (s_st.temp > kLgAcMinTemp) s_st.temp--; break;
+    case B_SWING: {
+      s_st.power = true;
+      const AcProfile& p = s_profs[s_profIdx];
+      if (p.swingCodes.empty()) return;
+      s_swingIdx = (s_swingIdx + 1) % (int)p.swingCodes.size();
+      s_rawSend.send(p.swingProto, p.swingCodes[s_swingIdx], kLgBits);
+      return;  // comando direto, nao reenvia o estado completo
+    }
+    case B_SPEED: {
+      s_st.power = true;
+      int i = 0; for (; i < kFanCycleCount; i++) if (kFanCycle[i] == s_st.fan) break;
+      if (i >= kFanCycleCount) i = -1;
+      s_st.fan = kFanCycle[(i + 1) % kFanCycleCount];
+      break;
+    }
+    case B_LIGHT: {
+      const AcProfile& p = s_profs[s_profIdx];
+      if (p.lightCode) s_rawSend.send(p.lightProto, p.lightCode, kLgBits);
+      return;  // toggle direto da luz do display
+    }
+  }
+  acApplyAndSend();
+}
+
+// ---------- telas: estado de lista ----------
+enum class AScreen : uint8_t { List, Details, Control };
+static AScreen s_scr = AScreen::List;
+
+static std::vector<int> s_order;
+static std::vector<String> s_recentNames;
+static std::vector<int> s_recent;
+struct Row { int idx; bool header; const char* label; };
+static std::vector<Row> s_rows;
+static int s_sel = 0, s_top = 0, s_selProf = 0;
+static int s_navSel = 0;   // botao do controle selecionado (tela Control)
+static bool s_drawn = false;
+
+static int listTopY()   { return kBodyTop + 6; }
+static int listBottom() { return irContentBottom() - 4; }
+static int listRows()   { int r = (listBottom() - listTopY()) / LIST_ROW_H; return r < 1 ? 1 : r; }
+
+static String acTrunc(const String& s, int maxPx) {
+  if (maxPx <= 0 || !s.length()) return s;
+  if ((int)tft.textWidth(s, 1) <= maxPx) return s;
+  const int ell = tft.textWidth("...", 1);
+  String o = s;
+  while (o.length() && (int)tft.textWidth(o, 1) + ell > maxPx) o.remove(o.length() - 1);
+  return o + "...";
+}
+
+// ---------- recentes ----------
+static void loadRecentNames() {
+  s_recentNames.clear();
+  if (!isSDCardAvailable()) return;
+  File f = SD.open(AC_RECENT, FILE_READ);
+  if (!f) return;
+  while (f.available() && (int)s_recentNames.size() < 3) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length()) s_recentNames.push_back(line);
+  }
+  f.close();
+}
+static void saveRecentNames() {
+  if (!isSDCardAvailable()) return;
+  if (!SD.exists(AC_DIR)) SD.mkdir(AC_DIR);
+  if (SD.exists(AC_RECENT)) SD.remove(AC_RECENT);
+  File f = SD.open(AC_RECENT, FILE_WRITE);
+  if (!f) return;
+  for (auto& n : s_recentNames) f.println(n);
+  f.close();
+}
+static void pushRecent(const String& name) {
+  if (!name.length()) return;
+  for (int i = 0; i < (int)s_recentNames.size(); i++)
+    if (s_recentNames[i] == name) { s_recentNames.erase(s_recentNames.begin() + i); break; }
+  s_recentNames.insert(s_recentNames.begin(), name);
+  while ((int)s_recentNames.size() > 3) s_recentNames.pop_back();
+  saveRecentNames();
+}
+
+static void rebuildOrder() {
+  s_order.clear();
+  for (int i = 0; i < (int)s_profs.size(); i++) s_order.push_back(i);
+  std::sort(s_order.begin(), s_order.end(), [](int a, int b) {
+    const AcProfile& pa = s_profs[a];
+    const AcProfile& pb = s_profs[b];
+    auto up = [](String s) { s.toUpperCase(); return s; };
+    String x, y;
+    x = up(pa.brand); y = up(pb.brand); if (x != y) return x < y;
+    x = up(pa.model); y = up(pb.model); if (x != y) return x < y;
+    x = up(pa.name);  y = up(pb.name);  return x < y;
+  });
+}
+static void rebuildRecent() {
+  s_recent.clear();
+  for (auto& n : s_recentNames) {
+    for (int i = 0; i < (int)s_profs.size(); i++)
+      if (s_profs[i].name == n) { s_recent.push_back(i); break; }
+    if ((int)s_recent.size() >= 3) break;
+  }
+}
+static int firstSelectable() {
+  for (int i = 0; i < (int)s_rows.size(); i++) if (!s_rows[i].header) return i;
+  return 0;
+}
+static void rebuildRows() {
+  s_rows.clear();
+  if (!s_recent.empty()) {
+    s_rows.push_back({ -1, true, "Recentes" });
+    for (int idx : s_recent) s_rows.push_back({ idx, false, nullptr });
+    s_rows.push_back({ -1, true, "Todos" });
+  }
+  for (int idx : s_order) s_rows.push_back({ idx, false, nullptr });
+  if (s_sel < 0 || s_sel >= (int)s_rows.size() || s_rows[s_sel].header) s_sel = firstSelectable();
+}
+static void moveSel(int dir) {
+  int n = (int)s_rows.size();
+  if (n == 0) return;
+  int i = s_sel + dir;
+  while (i >= 0 && i < n && s_rows[i].header) i += dir;
+  if (i < 0 || i >= n) return;
+  s_sel = i;
+}
+static void ensureVisible() {
+  int rows = listRows();
+  if (s_sel < s_top) s_top = s_sel;
+  if (s_sel >= s_top + rows) s_top = s_sel - rows + 1;
+  if (s_top < 0) s_top = 0;
+}
+
+// ---------- desenho ----------
+static void drawToolbar() {
+  tft.fillRect(0, kToolbarY, 240, kToolbarH, UI_FG);
+  tft.drawBitmap(kIconBackX, kToolbarY, bitmap_icon_go_back, kIconSize, kIconSize, UI_ICON);
+  if (s_scr != AScreen::Details)
+    tft.drawBitmap(kIconReloadX, kToolbarY, bitmap_icon_undo, kIconSize, kIconSize, UI_ICON);
+  tft.drawFastHLine(0, kToolbarBottom, 240, UI_LINE);
+}
+
+static void drawList() {
+  tft.fillRect(0, kBodyTop, 240, irContentBottom() - kBodyTop, FEATURE_BG);
+  tft.setTextFont(1); tft.setTextSize(1);
+  if (s_rows.empty()) {
+    tft.setTextColor(UI_WARN, FEATURE_BG);
+    tft.setCursor(kPadX, listTopY() + 4);
+    tft.print("Sem controles A/C");
+    return;
+  }
+  ensureVisible();
+  const int rows = listRows();
+  const int baseY = listTopY();
+  const int innerW = 240 - 2 * kPadX;
+  for (int r = 0; r < rows; r++) {
+    const int ri = s_top + r;
+    if (ri >= (int)s_rows.size()) break;
+    const Row& row = s_rows[ri];
+    const int ry = baseY + r * LIST_ROW_H;
+    if (row.header) {
+      tft.setTextColor(UI_ICON, FEATURE_BG);
+      tft.setCursor(kPadX, ry + 6);
+      tft.print(row.label);
+      tft.drawFastHLine(kPadX, ry + LIST_ROW_H - 2, innerW, UI_LINE);
+      continue;
+    }
+    const AcProfile& p = s_profs[row.idx];
+    const bool sel = (ri == s_sel);
+    const uint16_t bg = sel ? UI_FG : FEATURE_BG;
+    const uint16_t fg = sel ? UI_ICON : UI_TEXT;
+    tft.fillRect(kPadX, ry, innerW, LIST_ROW_H - 1, bg);
+    const char* tag = p.fromSd ? "SD" : "BI";
+    const int tagW = tft.textWidth(tag, 1);
+    tft.setTextColor(p.fromSd ? UI_OK : UI_DIM_TEXT, bg);
+    tft.setCursor(kPadX + innerW - tagW - 2, ry + 6);
+    tft.print(tag);
+    tft.setTextColor(fg, bg);
+    tft.setCursor(kPadX + 4, ry + 6);
+    tft.print(acTrunc(p.name, innerW - tagW - 14));
+  }
+}
+
+static void drawDetails() {
+  tft.fillRect(0, kBodyTop, 240, irContentBottom() - kBodyTop, FEATURE_BG);
+  if (s_selProf < 0 || s_selProf >= (int)s_profs.size()) return;
+  const AcProfile& p = s_profs[s_selProf];
+  tft.setTextFont(1); tft.setTextSize(1);
+  int y = kBodyTop + 8;
+  const int step = 18;
+  const int valX = kPadX + 80;
+  auto line = [&](const char* label, const String& val, uint16_t vc) {
+    tft.setTextColor(UI_DIM_TEXT, FEATURE_BG);
+    tft.setCursor(kPadX, y); tft.print(label);
+    tft.setTextColor(vc, FEATURE_BG);
+    tft.setCursor(valX, y);
+    tft.print(acTrunc(val.length() ? val : String("-"), 240 - valX - kPadX));
+    y += step;
+  };
+  line("Nome:",     p.name, UI_TEXT);
+  line("Marca:",    p.brand, UI_TEXT);
+  line("Modelo:",   String(lgModelName(p.lgModel)), UI_OK);
+  line("Protocolo:",String(lgProtoName(p.lgModel)), UI_TEXT);
+  line("Temp:",     String(kLgAcMinTemp) + "-" + String(kLgAcMaxTemp) + "C", UI_TEXT);
+  line("Modos:",    "Cool/Dry/Fan/Auto/Heat", UI_TEXT);
+  line("Fonte:",    p.fromSd ? String("SD card") : String("Built-in"), p.fromSd ? UI_OK : UI_DIM_TEXT);
+}
+
+// Desenha um botao do controle AC; selecionado = Primary (vermelho, como o PWR).
+static void acDrawBtn(int i, bool sel) {
+  const FeatureUI::Button& b = s_btn[i];
+  FeatureUI::drawButtonRect(b.x, b.y, b.w, b.h, b.label,
+                            sel ? FeatureUI::ButtonStyle::Primary : FeatureUI::ButtonStyle::Secondary,
+                            false, b.disabled, 2);
+}
+
+static void acLayout() {
+  const int top = kBodyTop + 24;
+  const int bottom = irContentBottom() - 6;
+  const int unit = (bottom - top) / 5;
+  const int bh = unit - 6;
+  const int sideW = 80, centerW = 96;
+  const int xL = 8, xR = 240 - 8 - sideW, xC = (240 - centerW) / 2;
+  int y = top;
+  s_btn[B_PWR]    = { (int16_t)xL,(int16_t)y,(int16_t)sideW,(int16_t)bh,"PWR", FeatureUI::ButtonStyle::Primary,  false };
+  s_btn[B_MODE]   = { (int16_t)xR,(int16_t)y,(int16_t)sideW,(int16_t)bh,"MODE",FeatureUI::ButtonStyle::Secondary,false };
+  y += unit;
+  s_btn[B_TEMPUP] = { (int16_t)xC,(int16_t)y,(int16_t)centerW,(int16_t)bh,"TEMP +",FeatureUI::ButtonStyle::Secondary,false };
+  y += unit;
+  s_btn[B_TEMPDN] = { (int16_t)xC,(int16_t)y,(int16_t)centerW,(int16_t)bh,"TEMP -",FeatureUI::ButtonStyle::Secondary,false };
+  y += unit;
+  s_btn[B_SWING]  = { (int16_t)xL,(int16_t)y,(int16_t)sideW,(int16_t)bh,"SWING",FeatureUI::ButtonStyle::Secondary,false };
+  s_btn[B_SPEED]  = { (int16_t)xR,(int16_t)y,(int16_t)sideW,(int16_t)bh,"SPEED",FeatureUI::ButtonStyle::Secondary,false };
+  y += unit;
+  s_btn[B_LIGHT]  = { (int16_t)xC,(int16_t)y,(int16_t)centerW,(int16_t)bh,"LIGHT",FeatureUI::ButtonStyle::Secondary,false };
+}
+
+static void drawControl() {
+  tft.fillRect(0, kBodyTop, 240, irContentBottom() - kBodyTop, FEATURE_BG);
+  if (s_profIdx < 0 || s_profIdx >= (int)s_profs.size()) return;
+  const AcProfile& p = s_profs[s_profIdx];
+  tft.setTextFont(1); tft.setTextSize(1);
+  tft.setTextColor(UI_ICON, FEATURE_BG);
+  tft.setCursor(kPadX, kBodyTop + 3);
+  tft.print(acTrunc(p.name, 240 - 2 * kPadX));
+  String stline = s_st.power
+      ? (String(modeName(s_st.mode)) + "  " + String(s_st.temp) + "C  Fan:" + fanName(s_st.fan)
+         + (s_swingIdx >= 0 ? (String("  Aba#") + String(s_swingIdx + 1)) : String("")))
+      : String("Desligado");
+  tft.setTextColor(s_st.power ? UI_OK : UI_DIM_TEXT, FEATURE_BG);
+  tft.setCursor(kPadX, kBodyTop + 13);
+  tft.print(acTrunc(stline, 240 - 2 * kPadX));
+  acLayout();
+  for (int i = 0; i < B_COUNT; i++) acDrawBtn(i, i == s_navSel);
+}
+
+static void drawFooter() {
+  if (s_scr == AScreen::List)
+    setTouchNavLabels("Voltar", "Baixo", "Load", "Cima", "Detalhes");
+  else if (s_scr == AScreen::Details)
+    setTouchNavLabels("Voltar", "", "", "", "");
+  else
+    setTouchNavLabels("Voltar", "", "OK", "", "");
+  irRedrawNavChrome();
+}
+
+static void drawAll() {
+  irClearBody(FEATURE_BG);
+  drawStatusBar(readBatteryVoltage(), true);
+  drawToolbar();
+  if (s_scr == AScreen::List)         drawList();
+  else if (s_scr == AScreen::Details) drawDetails();
+  else                                drawControl();
+  drawFooter();
+  s_drawn = true;
+}
+
+// ---------- acoes ----------
+static void doReload() {
+  refreshAc();
+  rebuildOrder();
+  rebuildRecent();
+  rebuildRows();
+  s_top = 0;
+  s_drawn = false;
+}
+static void goList()  { s_scr = AScreen::List; s_drawn = false; }
+static void openDetails() {
+  if (s_rows.empty()) return;
+  const Row& row = s_rows[s_sel];
+  if (row.header || row.idx < 0) return;
+  s_selProf = row.idx;
+  s_scr = AScreen::Details;
+  s_drawn = false;
+}
+static void loadSelected() {
+  if (s_rows.empty()) return;
+  const Row& row = s_rows[s_sel];
+  if (row.header || row.idx < 0) return;
+  s_profIdx = row.idx;
+  pushRecent(s_profs[s_profIdx].name);
+  rebuildRecent(); rebuildRows();
+  // reinicia estado ao abrir um controle
+  s_st = AcState();
+  s_swingIdx = -1;
+  s_lg.stateReset();
+  s_lg.setModel(s_profs[s_profIdx].lgModel);
+  s_navSel = 0;   // PWR
+  s_scr = AScreen::Control;
+  s_drawn = false;
+}
+
+static void ctrlGo(int ni) {
+  if (ni < 0 || ni == s_navSel) return;
+  const int o = s_navSel;
+  s_navSel = ni;
+  acDrawBtn(o, false);
+  acDrawBtn(s_navSel, true);
+}
+
+static void ctrlNav(int dir) {
+  ctrlGo(irNavSelect(s_btn, (int)B_COUNT, s_navSel, dir));
+}
+
+static void goList();
+static void ctrlLeft() {
+  const int ni = irNavSelect(s_btn, (int)B_COUNT, s_navSel, 2);
+  if (ni != s_navSel) { ctrlGo(ni); return; }
+  if (irIsLeftEdge(s_btn, (int)B_COUNT, s_navSel)) goList();  // so volta na coluna mais a esq
+}
+
+static void ctrlActivate() {
+  if (s_navSel < 0 || s_navSel >= (int)B_COUNT) return;
+  acDrawBtn(s_navSel, true);
+  acButton(s_navSel);
+  delay(90);
+  drawControl();   // atualiza linha de estado + mantem selecao
+}
+
+static bool handleToolbarTouch(int x, int y) {
+  if (y <= kToolbarY || y >= kToolbarBottom) return false;
+  if (x > kIconBackX && x < kIconBackX + kIconSize) {
+    if (s_scr == AScreen::List) feature_exit_requested = true;
+    else goList();
+    return true;
+  }
+  if (s_scr != AScreen::Details && x > kIconReloadX && x < kIconReloadX + kIconSize) {
+    doReload();
+    return true;
+  }
+  return false;
+}
+
+void setup() {
+  setTouchButtonInputEnabled(true);
+  s_lg.begin();
+  s_rawSend.begin();
+  s_scr = AScreen::List;
+  s_profIdx = 0;
+  s_drawn = false;
+  loadRecentNames();
+  refreshAc();
+  rebuildOrder();
+  rebuildRecent();
+  rebuildRows();
+  s_sel = firstSelectable();
+  s_top = 0;
+  drawAll();
+}
+
+void loop() {
+  if (feature_active && feature_exit_requested) {
+    return;
+  }
+  if (!s_drawn) drawAll();
+  maintainTouchNavBar();
+
+  if (s_scr == AScreen::List) {
+    if (isButtonPressedEdge(BTN_UP))     { moveSel(-1); drawList(); }
+    if (isButtonPressedEdge(BTN_DOWN))   { moveSel(+1); drawList(); }
+    if (isButtonPressedEdge(BTN_LEFT))   { feature_exit_requested = true; }   // volta/sai
+    if (isButtonPressedEdge(BTN_RIGHT))  { openDetails(); }
+    if (isButtonPressedEdge(BTN_SELECT)) { loadSelected(); }                  // meio = Load
+  } else if (s_scr == AScreen::Details) {
+    if (isButtonPressedEdge(BTN_LEFT))   { goList(); }
+  } else { // Control: setas movem (espacial); esq no canto = Voltar; meio aciona
+    const bool nUp = isButtonPressedEdge(BTN_UP);
+    const bool nDn = isButtonPressedEdge(BTN_DOWN);
+    const bool nRt = isButtonPressedEdge(BTN_RIGHT);
+    const bool nLf = isButtonPressedEdge(BTN_LEFT);
+    const bool nOk = isButtonPressedEdge(BTN_SELECT);
+    static uint32_t lastNavMs = 0;
+    const uint32_t nowNav = millis();
+    if ((uint32_t)(nowNav - lastNavMs) > 160) {   // anti-bounce (1 acao por toque)
+      if      (nUp) { ctrlNav(0);     lastNavMs = nowNav; }
+      else if (nDn) { ctrlNav(1);     lastNavMs = nowNav; }
+      else if (nRt) { ctrlNav(3);     lastNavMs = nowNav; }
+      else if (nLf) { ctrlLeft();     lastNavMs = nowNav; }
+      else if (nOk) { ctrlActivate(); lastNavMs = nowNav; }
+    }
+  }
+
+  static uint32_t lastTouchMs = 0;
+  static bool touchWas = false;
+  const uint32_t now = millis();
+  const bool touchNow = isTouchDownDismiss();
+  constexpr uint32_t kTouchDebounceMs = 280;
+  if (touchNow && !touchWas) {
+    int x, y;
+    touchWas = true;
+    if (!readTouchXY(x, y)) return;
+    if ((uint32_t)(now - lastTouchMs) < kTouchDebounceMs) return;
+    lastTouchMs = now;
+    if (handleToolbarTouch(x, y)) return;
+
+    if (s_scr == AScreen::List) {
+      const int rows = listRows();
+      const int ty = listTopY();
+      if (y >= ty && y < ty + rows * LIST_ROW_H) {
+        const int ri = s_top + (y - ty) / LIST_ROW_H;
+        if (ri >= 0 && ri < (int)s_rows.size() && !s_rows[ri].header) {
+          if (ri == s_sel) loadSelected();
+          else { s_sel = ri; drawList(); }
+        }
+      }
+    } else if (s_scr == AScreen::Control) {
+      const int k = FeatureUI::hit(s_btn, (int)B_COUNT, x, y);
+      if (k >= 0) {
+        s_navSel = k;
+        acDrawBtn(k, true);
+        acButton(k);
+        delay(90);
+        drawControl();   // atualiza linha de estado + botoes
+      }
+    }
+  }
+  if (!touchNow) touchWas = false;
+
+  delay(10);
+}
+
+}  // namespace IRUniversalAC
