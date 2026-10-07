@@ -826,4 +826,14 @@ extern bool submenu_initialized;
 extern bool is_main_menu;
 extern bool feature_exit_requested;
 
+// Menu/submenu display caches, reset to force a full repaint. Needed by the
+// Tetris overlay (Tetris.cpp) to redraw whatever plain menu/submenu screen
+// was frozen underneath it -- see tetrisLeave().
+void displayMenu();
+extern bool menu_initialized;
+extern int last_menu_index;
+extern int last_submenu_index;
+extern bool other_menu_grid_initialized;
+extern int last_other_menu_index;
+
 #endif

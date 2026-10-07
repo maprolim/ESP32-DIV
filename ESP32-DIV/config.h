@@ -182,6 +182,17 @@ namespace Deauther {
   void deautherSetup();
   void deautherLoop();
 }
+namespace Tetris {
+  // Entry/exit points for the LEFT+SELECT chord overlay (see ESP32-DIV.ino,
+  // maintainTetrisChord()). tetrisEnter() repaints from the persisted game
+  // state (or starts a new game if none is in progress / after game over --
+  // it never resets an in-progress game). tetrisLeave() best-effort redraws
+  // whatever plain menu/submenu was frozen underneath; it is a no-op for a
+  // live feature screen, see Tetris.cpp.
+  void tetrisEnter();
+  void tetrisLoop();
+  void tetrisLeave();
+}
 namespace ProbeRequestFlood {
   void probeRequestFloodSetup();
   void probeRequestFloodLoop();

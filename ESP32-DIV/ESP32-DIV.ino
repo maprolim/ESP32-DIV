@@ -824,7 +824,63 @@ bool isTouchNavButtonPressed(int buttonPin) {
   return isTouchNavSlotDown(idx);
 }
 
+// --- Global LEFT+SELECT chord: Tetris overlay ----------------------------
+// There is no central per-frame feature dispatch in this codebase: every
+// feature runs its own blocking while() loop deep in the call stack (see
+// handleWiFiSubmenuButtons() etc.), so loop() itself is parked on the stack
+// for as long as a feature is active. The only chokepoint every feature (and
+// the plain menu) already passes through on its own is this central button
+// layer, so the chord is detected here instead of in loop(). Entering/leaving
+// Tetris is done by *not returning* from this call until the user chords
+// back out, which freezes the caller's entire stack frame exactly where it
+// was (not just its globals) -- true freeze, nothing to recreate on return.
+//
+// maintainTetrisChord() never touches the real edge tracker (s_physEdgeLast)
+// that isButtonPressedEdge() owns below; it keeps its own independent
+// bookkeeping and simply forces BTN_SELECT to read as "not pressed" to
+// everyone else for the rest of this physical press once a chord fires, so
+// neither the frozen feature nor Tetris itself ever sees the triggering
+// SELECT press.
+bool tetrisOverlayActive = false;
+static bool s_chordSelectEdge = false;
+static bool s_selectConsumedByChord = false;
+
+static void maintainTetrisChord() {
+  const bool selectDown = isPhysicalButtonPressed(BTN_SELECT) || isTouchNavButtonPressed(BTN_SELECT);
+  if (!selectDown) {
+    s_chordSelectEdge = false;
+    s_selectConsumedByChord = false;   // released: re-arm for the next press
+    return;
+  }
+  if (s_chordSelectEdge) {
+    return;   // still the same held press, not a new edge
+  }
+  s_chordSelectEdge = true;
+
+  if (!isPhysicalButtonPressed(BTN_LEFT)) {
+    return;   // plain SELECT press (LEFT not physically held) -- not the chord
+  }
+
+  s_selectConsumedByChord = true;   // chord: hide this SELECT press from everyone else
+  tetrisOverlayActive = !tetrisOverlayActive;
+  if (tetrisOverlayActive) {
+    Tetris::tetrisEnter();
+    while (tetrisOverlayActive) {
+      Tetris::tetrisLoop();
+      delay(1);
+    }
+  } else {
+    Tetris::tetrisLeave();
+  }
+}
+
 bool isButtonPressed(int buttonPin) {
+  if (buttonPin == BTN_SELECT) {
+    maintainTetrisChord();
+    if (s_selectConsumedByChord) {
+      return false;
+    }
+  }
   if (isPhysicalButtonPressed(buttonPin)) {
     return true;
   }
@@ -848,6 +904,12 @@ bool isTouchNavButtonPressedEdge(int buttonPin) {
 }
 
 bool isButtonPressedEdge(int buttonPin) {
+  if (buttonPin == BTN_SELECT) {
+    maintainTetrisChord();
+    if (s_selectConsumedByChord) {
+      return false;
+    }
+  }
 #if HAS_PCF8574_BUTTONS
   if (getPcf8574Address() != 0) {
     const int idx = buttonPin & 7;
@@ -882,6 +944,13 @@ void waitButtonReleased(int buttonPin) {
 }
 
 bool featureExitButtonPressed() {
+  // Bypasses isButtonPressed/isButtonPressedEdge, so it needs the same chord
+  // guard explicitly -- otherwise the triggering SELECT press of a chord
+  // would still leak through here and fire whatever feature's exit path.
+  maintainTetrisChord();
+  if (s_selectConsumedByChord) {
+    return false;
+  }
   return isPhysicalButtonPressed(BTN_SELECT) || isTouchNavButtonPressed(BTN_SELECT);
 }
 
