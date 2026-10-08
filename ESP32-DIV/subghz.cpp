@@ -3,6 +3,7 @@
 #include "KeyboardUI.h"
 #include "Touchscreen.h"
 #include "config.h"
+#include "hwdetect.h"
 #include "icon.h"
 #include "shared.h"
 
@@ -438,6 +439,57 @@ static void subghzSetProfileNavLabels() {
 
 static void subghzSetBruteNavLabels() {
   setTouchNavLabels("Prev", "Sel", "Exit", "Go", "Next");
+}
+
+/* ── Is there actually a CC1101 on the bus? ────────────────────────────────
+ *
+ * ELECHOUSE_CC1101::Init() and Reset() both open with
+ *
+ *     while(digitalRead(MISO_PIN));
+ *
+ * with no deadline. If no module is fitted, or MISO is not wired, the pin
+ * floats and that loop never returns: the board stops with the feature's
+ * screen already drawn and nothing responding. The task watchdog does not
+ * fire, because the spin keeps interrupts enabled, so it presents as a
+ * freeze rather than a reset.
+ *
+ * This gates Init() on g_hwPresence.cc1101 instead of probing again here.
+ * hwDetectAll() already ran this exact check once at boot (see hwdetect.cpp)
+ * using CHIP_RDY rather than the PARTNUM/VERSION registers: on this clone
+ * module VERSION reads back 0x00 even when the chip is present and working,
+ * so a fresh PARTNUM/VERSION probe here would misreport a fitted radio as
+ * missing. Reusing the boot-time result avoids repeating that mistake. */
+static bool cc1101Present() {
+  return g_hwPresence.cc1101;
+}
+
+static void cc1101ReportMissing(const char* feature) {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_RED, TFT_BLACK);
+  tft.drawString("No CC1101", 12, 40);
+  tft.setTextFont(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(feature, 12, 66);
+  tft.drawString("needs the sub-GHz radio, and nothing", 12, 84);
+  tft.drawString("answered on the SPI bus.", 12, 96);
+  tft.drawString("Check the module is fitted and that", 12, 116);
+  tft.drawString("MISO, CS, SCK and MOSI are wired.", 12, 128);
+  delay(2500);
+}
+
+/* Init() if there is something to initialise. Returns false when the caller
+ * must give up, and asks the dispatch loop to unwind the feature the way a
+ * normal exit does, so the caller's `return` leaves rather than dropping
+ * into a loop with no radio under it. */
+static bool cc1101InitIfPresent(const char* feature) {
+  if (!cc1101Present()) {
+    cc1101ReportMissing(feature);
+    feature_exit_requested = true;
+    return false;
+  }
+  ELECHOUSE_cc1101.Init();
+  return true;
 }
 
 namespace replayat { void replayHandleNavButtons(); }
@@ -1393,7 +1445,7 @@ void ReplayAttackSetup() {
   subghzRedrawNavChrome();
 
   /* Bring radio up after UI/SPI activity so first entry RX matches re-entry. */
-  ELECHOUSE_cc1101.Init();
+  if (!cc1101InitIfPresent("Replay Attack")) return;
   ELECHOUSE_cc1101.setCCMode(0);
   ELECHOUSE_cc1101.setModulation(2);
   ELECHOUSE_cc1101.setRxBW(500.0);
@@ -2237,7 +2289,7 @@ void saveSetup() {
     subghzRedrawNavChrome();
     uiDrawn = false;
 
-    ELECHOUSE_cc1101.Init();
+    if (!cc1101InitIfPresent("Saved Profile")) return;
     ELECHOUSE_cc1101.setCCMode(0);
     ELECHOUSE_cc1101.setModulation(2);
     pinMode(SUBGHZ_RX_PIN, INPUT);
@@ -2745,7 +2797,7 @@ void subjammerSetup() {
 
     ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
 
-    ELECHOUSE_cc1101.Init();
+    if (!cc1101InitIfPresent("SubGHz Jammer")) return;
     ELECHOUSE_cc1101.setModulation(0);
     ELECHOUSE_cc1101.setRxBW(500.0);
     ELECHOUSE_cc1101.setPA(12);
@@ -2841,6 +2893,20 @@ void subjammerLoop() {
           }
       }
   }
+
+/* Stop transmitting when the feature is left.
+ *
+ * jammingRunning is only ever cleared by subjammerToggleJam(), so backing
+ * out of the jammer while it is running leaves the flag set, the CC1101 in
+ * TX, and in continuousMode TX_PIN HIGH. Nothing on screen says so.
+ *
+ * Same three lines the stop button already runs. */
+void exit() {
+  jammingRunning = false;
+  ELECHOUSE_cc1101.setSidle();
+  digitalWrite(TX_PIN, LOW);
+}
+
 }
 
 namespace SubBrute {
@@ -3599,7 +3665,7 @@ void subBruteSetup() {
 
   ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
   ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
-  ELECHOUSE_cc1101.Init();
+  if (!cc1101InitIfPresent("De Bruijn / Brute")) return;
   ELECHOUSE_cc1101.setCCMode(0);
   ELECHOUSE_cc1101.setModulation(2);
   ELECHOUSE_cc1101.setRxBW(500.0);
@@ -3763,7 +3829,7 @@ static JdDisp s_disp;
 
 static void cc1101BeginRx() {
   ELECHOUSE_cc1101.setSpiPin(CC1101_SCK, CC1101_MISO, CC1101_MOSI, CC1101_CS);
-  ELECHOUSE_cc1101.Init();
+  if (!cc1101InitIfPresent("Jamming Detector")) return;
   ELECHOUSE_cc1101.setModulation(2);
   ELECHOUSE_cc1101.setRxBW(JD_RXBW);
   ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
