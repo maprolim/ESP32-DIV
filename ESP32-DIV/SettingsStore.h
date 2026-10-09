@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include "shared.h"
 #include "Lang.h"
+#include "Strings.h"
 
 #ifndef SETTINGS_PATH
 #define SETTINGS_PATH "/config/settings.json"
@@ -29,7 +30,7 @@ struct AppSettings {
 };
 
 struct AccentOption {
-  const char* name;
+  StrKey name;  // resolved through t() at draw time, see accentPresetName()
   uint16_t color565;
 };
 

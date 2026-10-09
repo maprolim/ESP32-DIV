@@ -8,13 +8,13 @@ static AppSettings g_settings;
 AppSettings& settings() { return g_settings; }
 
 static const AccentOption kAccentPresets[] = {
-  {"Orange", 0xFBE4},
-  {"Green",  0xB721},
-  {"Red",    0xF800},
-  {"Cyan",   0x07FF},
-  {"Purple", 0xF81F},
-  {"Yellow", 0xFFE0},
-  {"White",  0xFFFF},
+  {STR_ACCENT_ORANGE, 0xFBE4},
+  {STR_ACCENT_GREEN,  0xB721},
+  {STR_ACCENT_RED,    0xF800},
+  {STR_ACCENT_CYAN,   0x07FF},
+  {STR_ACCENT_PURPLE, 0xF81F},
+  {STR_ACCENT_YELLOW, 0xFFE0},
+  {STR_ACCENT_WHITE,  0xFFFF},
 };
 
 uint8_t accentPresetClamp(uint8_t preset) {
@@ -27,7 +27,7 @@ uint16_t accentColor565(uint8_t preset) {
 }
 
 const char* accentPresetName(uint8_t preset) {
-  return kAccentPresets[accentPresetClamp(preset)].name;
+  return t(kAccentPresets[accentPresetClamp(preset)].name);
 }
 
 const char* settingsBoardProfileId() {

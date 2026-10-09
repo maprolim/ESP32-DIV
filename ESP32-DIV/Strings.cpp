@@ -21,10 +21,15 @@ const LocStr STRINGS[STR_KEY_COUNT] = {
     {"IR Remote", "Controle IR", "Control IR"},                  // STR_TILE_IR
     {"RFID/NFC", "RFID/NFC", "RFID/NFC"},                        // STR_TILE_RFID
     {"GPS", "GPS", "GPS"},                                        // STR_TILE_GPS
+    {"Back", "Voltar", "Volver"},                                 // STR_MORE_BACK
     {"Main Menu", "Menu Principal", "Menu Principal"},           // STR_MAIN_MENU
 
     // Shared trailing nav entry of every paged submenu list
     {"Back to Main Menu", "Voltar ao Menu Principal", "Volver al Menu Principal"}, // STR_BACK_TO_MAIN_MENU
+
+    // Paged-submenu footer's page-advance button
+    {"Next Page", "Proxima", "Proxima"},                          // STR_PAGED_NEXT_PAGE
+    {"Previous", "Anterior", "Anterior"},                         // STR_PAGED_PREV_PAGE
 
     // Settings tile's own row labels
     {"Brightness", "Brilho", "Brillo"},                          // STR_SETTINGS_BRIGHTNESS
@@ -33,6 +38,36 @@ const LocStr STRINGS[STR_KEY_COUNT] = {
     {"NeoPixel", "NeoPixel", "NeoPixel"},                        // STR_SETTINGS_NEOPIXEL
     {"Auto Scan", "Scan Automatico", "Escaneo Automatico"},      // STR_SETTINGS_AUTO_SCAN
     {"Language", "Idioma", "Idioma"},                            // STR_SETTINGS_LANGUAGE
+
+    // Settings screen's own footer buttons
+    {"Back", "Voltar", "Volver"},                                 // STR_SETTINGS_BACK
+    {"Save", "Salvar", "Guardar"},                                // STR_SETTINGS_SAVE
+
+    // Settings > Theme row's two values
+    {"Dark", "Escuro", "Oscuro"},                                 // STR_SETTINGS_THEME_DARK
+    {"Light", "Claro", "Claro"},                                  // STR_SETTINGS_THEME_LIGHT
+
+    // Every on/off switch row's value label
+    {"ON", "LIGADO", "ENCENDIDO"},                                // STR_SETTINGS_ON
+    {"OFF", "DESLIGADO", "APAGADO"},                              // STR_SETTINGS_OFF
+
+    // Settings > Accent row's color names
+    {"Orange", "Laranja", "Naranja"},                             // STR_ACCENT_ORANGE
+    {"Green", "Verde", "Verde"},                                  // STR_ACCENT_GREEN
+    {"Red", "Vermelho", "Rojo"},                                  // STR_ACCENT_RED
+    {"Cyan", "Ciano", "Cian"},                                    // STR_ACCENT_CYAN
+    {"Purple", "Roxo", "Morado"},                                 // STR_ACCENT_PURPLE
+    {"Yellow", "Amarelo", "Amarillo"},                            // STR_ACCENT_YELLOW
+    {"White", "Branco", "Blanco"},                                // STR_ACCENT_WHITE
+
+    // About screen
+    {"by ", "Por ", "Por "},                                      // STR_ABOUT_BY
+    {"Board", "Placa", "Placa"},                                  // STR_ABOUT_BOARD
+    {"Built-in", "Embutido", "Integrado"},                        // STR_ABOUT_BUILTIN
+    {"Installed", "Instalado", "Instalado"},                      // STR_ABOUT_INSTALLED
+    {"Supported", "Suportado", "Soportado"},                      // STR_ABOUT_SUPPORTED
+    {"Unsupported", "Nao suportado", "No soportado"},             // STR_ABOUT_UNSUPPORTED
+    {"SELECT / tap to go back", "Toque para voltar", "Toque para volver"}, // STR_ABOUT_TAP_TO_GO_BACK
 
     // WiFi features
     {"Packet Monitor", "Monitor de Pacotes", "Monitor de Paquetes"},             // STR_WIFI_PACKET_MONITOR

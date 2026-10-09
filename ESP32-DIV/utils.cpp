@@ -1948,12 +1948,26 @@ static void drawBrightness(uint8_t v, bool selected) {
   drawBrightnessWidget(v, selected);
 }
 
+// Builds the bracketed-when-active label ("[Escuro]"/"Claro", in whatever
+// language is current) into `buf`. Shared by the touch-hit rects below and
+// the actual draw, so they can never disagree on the label text/width --
+// they did briefly disagree here once already (hardcoded "[Dark]"/"Light"
+// in the rects vs. the real, translated label in the draw), which would
+// have misaligned the tap target from the visible text in PT-BR/ES.
+static const char* themeLabel(Theme th, Theme active, char* buf, size_t bufSize) {
+  const char* base = (th == Theme::Dark) ? t(STR_SETTINGS_THEME_DARK) : t(STR_SETTINGS_THEME_LIGHT);
+  if (th != active) return base;
+  snprintf(buf, bufSize, "[%s]", base);
+  return buf;
+}
+
 static Rect rThemeDark()  {
   Rect r = rowRect(1);
   int right = r.x + r.w - 6;
   tft.setTextFont(2);
-  int wD = (int)tft.textWidth("[Dark]");
-  int wL = (int)tft.textWidth("Light");
+  char bufD[24], bufL[24];
+  int wD = (int)tft.textWidth(themeLabel(Theme::Dark, settings().theme, bufD, sizeof(bufD)));
+  int wL = (int)tft.textWidth(themeLabel(Theme::Light, settings().theme, bufL, sizeof(bufL)));
   int gap = 6;
   return makeRect(right - wD - gap - wL, r.y + 8, wD, r.h - 16);
 }
@@ -1961,7 +1975,8 @@ static Rect rThemeLight() {
   Rect r = rowRect(1);
   int right = r.x + r.w - 6;
   tft.setTextFont(2);
-  int wL = (int)tft.textWidth("[Light]");
+  char buf[24];
+  int wL = (int)tft.textWidth(themeLabel(Theme::Light, settings().theme, buf, sizeof(buf)));
   return makeRect(right - wL, r.y + 8, wL, r.h - 16);
 }
 
@@ -1976,8 +1991,9 @@ static void drawThemeWidget(Theme th, bool ) {
 
   setLabelFont();
 
-  const char* darkLabel  = (th == Theme::Dark)  ? "[Dark]"  : "Dark";
-  const char* lightLabel = (th == Theme::Light) ? "[Light]" : "Light";
+  char bufD[24], bufL[24];
+  const char* darkLabel  = themeLabel(Theme::Dark, th, bufD, sizeof(bufD));
+  const char* lightLabel = themeLabel(Theme::Light, th, bufL, sizeof(bufL));
 
   int wD = (int)tft.textWidth(darkLabel);
   int wL = (int)tft.textWidth(lightLabel);
@@ -2118,7 +2134,7 @@ static void drawSwitchWidgetRow(bool on, bool , int row) {
   int labelX = tr.x - 26;
   int labelY = tr.y + 1;
   tft.setCursor(labelX, labelY);
-  tft.print(on ? "ON" : "OFF");
+  tft.print(on ? t(STR_SETTINGS_ON) : t(STR_SETTINGS_OFF));
 
   tft.endWrite();
 }
@@ -2170,10 +2186,10 @@ static void drawFooter(bool backPressed=false, bool savePressed=false){
   int clearW = SCREEN_W - (PAD_X*2) + 4;
   tft.fillRect(clearX, b.y-2, clearW, b.h+4, UI.bg);
 
-  FeatureUI::drawButtonRect(b.x, b.y, b.w, b.h, "Back",
+  FeatureUI::drawButtonRect(b.x, b.y, b.w, b.h, t(STR_SETTINGS_BACK),
                             backPressed ? FeatureUI::ButtonStyle::Primary : FeatureUI::ButtonStyle::Secondary);
 
-  FeatureUI::drawButtonRect(s.x, s.y, s.w, s.h, "Save",
+  FeatureUI::drawButtonRect(s.x, s.y, s.w, s.h, t(STR_SETTINGS_SAVE),
                             FeatureUI::ButtonStyle::Primary);
 }
 static bool touchInRect(const Rect& r, int x, int y) {

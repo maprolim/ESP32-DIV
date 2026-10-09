@@ -15,8 +15,8 @@
 
 #include "Lang.h"
 
-extern const InfoText wifi_page0_info[9];
-extern const InfoText bluetooth_page0_info[8];
+extern const InfoText wifi_page0_info[12];
+extern const InfoText bluetooth_page0_info[9];
 extern const InfoText nrf_info[6];
 extern const InfoText subghz_info[5];
 extern const InfoText tools_info[4];

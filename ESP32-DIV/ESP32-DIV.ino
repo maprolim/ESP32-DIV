@@ -73,8 +73,8 @@ const StrKey wifi_items[WIFI_FEATURE_COUNT] = {
     STR_WIFI_CHANNEL_GRAPH};
 
 // Info text (BTN_RIGHT on the WiFi menu) -- see wifi_page0_info in LangInfo.cpp;
-// only the first 9 items have text.
-static constexpr int WIFI_INFO_COUNT = 9;
+// all 12 items have text (spans both paged-submenu pages).
+static constexpr int WIFI_INFO_COUNT = 12;
 
 // Bluetooth's 9 features as one flat list, same idea as WiFi above.
 static constexpr int BT_FEATURE_COUNT = 9;
@@ -90,8 +90,8 @@ const StrKey bluetooth_items[BT_FEATURE_COUNT] = {
     STR_BT_SKIMMER_DETECT};
 
 // Info text (BTN_RIGHT) -- see bluetooth_page0_info in LangInfo.cpp;
-// only the first 8 items have text.
-static constexpr int BT_INFO_COUNT = 8;
+// all 9 items have text.
+static constexpr int BT_INFO_COUNT = 9;
 
 static FeatureUI::Button s_pagedFooterBtns[2];
 static int s_pagedFooterFocus = -1;  // 0=back, 1=page btn, -1=none
@@ -143,7 +143,7 @@ const StrKey other_submenu_items[other_NUM_SUBMENU_ITEMS] = {
     STR_TILE_IR,
     STR_TILE_RFID,
     STR_TILE_GPS,
-    STR_MAIN_MENU};
+    STR_MORE_BACK};
 
 const int rfid_NUM_SUBMENU_ITEMS = 9;
 const StrKey rfid_submenu_items[rfid_NUM_SUBMENU_ITEMS] = {
@@ -391,12 +391,47 @@ static int pagedNavRowY() {
 // land on the wrong row.
 static const int kPagedRowH = 28;
 
+static bool pagedOnLastPage() {
+    return g_pagedPage >= pagedPageCount() - 1;
+}
+
+// Label/icon flip direction depending on where we are: everywhere but the
+// last page, the button moves forward ("Next"); on the last page there is
+// no next page, so it moves backward instead ("Previous") -- both the text
+// and the action (see the three g_pagedPage updates below) agree on this.
 static const char* pagedPageBtnLabel() {
-    return "Next Page";  // always advances; wraps to page 0 after the last page
+    return pagedOnLastPage() ? t(STR_PAGED_PREV_PAGE) : t(STR_PAGED_NEXT_PAGE);
 }
 
 static const unsigned char* pagedPageBtnIcon() {
-    return bitmap_icon_navigate_right;
+    return pagedOnLastPage() ? bitmap_icon_navigate_left : bitmap_icon_navigate_right;
+}
+
+// The paged-submenu footer's "Main Menu" button actually just goes back one
+// level inside the "More" tile's IR/RFID/GPS screens (to the More grid),
+// not all the way to the main menu -- label it "Back" there instead, same
+// wording as the More grid's own back tile (STR_MORE_BACK). Every other
+// paged submenu (WiFi, Bluetooth, nRF24, SubGHz, Tools) really does go to
+// the main menu, so it keeps STR_MAIN_MENU.
+static StrKey pagedBackLabelKey() {
+    if (current_menu_index == 2 && other_layer != OTHER_LAYER_HOME) {
+        return STR_MORE_BACK;
+    }
+    return STR_MAIN_MENU;
+}
+
+// Advances to the next page, or back to the previous one when already on
+// the last page -- matches the "Next"/"Previous" flip in pagedPageBtnLabel()
+// above, so the button's text and its actual action always agree. The three
+// call sites below (generic paged-submenu touch, WiFi, Bluetooth) used to
+// each hardcode a forward-only +1, which is how a 2-page list ended up
+// showing "Next Page" with nowhere left to go on its last page.
+static void pagedAdvancePage() {
+    if (pagedOnLastPage()) {
+        g_pagedPage = (g_pagedPage - 1 + pagedPageCount()) % pagedPageCount();
+    } else {
+        g_pagedPage = (g_pagedPage + 1) % pagedPageCount();
+    }
 }
 
 static void layoutPagedFooterButtons() {
@@ -405,7 +440,7 @@ static void layoutPagedFooterButtons() {
     const int w0 = multiPage ? tft.width() / 2 : tft.width();
     s_pagedFooterBtns[0] = {
         0, (int16_t)y, (int16_t)w0, 28,
-        t(STR_MAIN_MENU), FeatureUI::ButtonStyle::Secondary, false};
+        t(pagedBackLabelKey()), FeatureUI::ButtonStyle::Secondary, false};
     if (multiPage) {
         s_pagedFooterBtns[1] = {
             (int16_t)w0, (int16_t)y, (int16_t)(tft.width() - w0), 28,
@@ -434,7 +469,7 @@ static void drawPagedFooterButtons() {
         tft.setTextColor(color, UI_BG);
         tft.drawBitmap(10, iconY, bitmap_icon_go_back, iconSize, iconSize, color);
         tft.setCursor(30, textY);
-        tft.print(t(STR_MAIN_MENU));
+        tft.print(t(pagedBackLabelKey()));
     }
 
     if (multiPage) {
@@ -512,7 +547,7 @@ static int pagedSubmenuTouchHit(int x, int y) {
         return pagedBackBtnIndex();
     }
     if (footerHit == 1) {
-        g_pagedPage = (g_pagedPage + 1) % pagedPageCount();
+        pagedAdvancePage();
         current_submenu_index = 0;
         pagedApplyPage();
         displaySubmenu();
@@ -990,7 +1025,7 @@ static int submenuItemY(int index) {
 }
 
 // A PT-BR/ES translation routinely runs longer than its English source
-// ("Settings" -> "Configurações"), which can overflow a 100px tile or a
+// ("Settings" -> "Configuracoes"), which can overflow a 100px tile or a
 // list row's tap zone. Returns `s` unchanged when it already fits inside
 // maxWidth (measured with whatever font is currently loaded); otherwise
 // returns a truncated copy with a trailing "..." that does fit. Uses a
@@ -1515,16 +1550,23 @@ void handleWiFiSubmenuButtons() {
         waitButtonReleased(BTN_DOWN);
     }
 
-    // RIGHT no item selecionado: abre uma tela cheia com a info (EN + PT-BR)
-    // (so nas 8 features da pagina 0, que tem texto cadastrado em wifi_page0_info_*).
+    // RIGHT on the selected item: opens a full-screen info page (all 12
+    // WiFi features have text in wifi_page0_info -- WIFI_INFO_COUNT). WiFi
+    // spans 2 paged-submenu pages, so the array index has to account for
+    // which page we're on; current_submenu_index alone is only the index
+    // *within* the current page. Also guard against the footer's
+    // "Main Menu"/"Next Page" buttons, which share the index range just
+    // past the real features (pagedFeatureCount()..).
     if (isButtonPressed(BTN_RIGHT)) {
         waitButtonReleased(BTN_RIGHT);
-        if (g_pagedPage == 0 && current_submenu_index < WIFI_INFO_COUNT) {
-            showFeatureInfoScreen(t(wifi_items[current_submenu_index]),
-                                  wifi_page0_info[current_submenu_index]);   // bloqueia ate soltar o BTN_LEFT
-            // A tela de info usou a tela inteira; forcar redraw completo do
-            // submenu (senao displaySubmenu() faz so o update incremental de
-            // sempre e deixa pixels da tela de info parados ate o proximo LEFT).
+        const int wifiGlobalIndex = g_pagedPage * kPagedItemsPerPage + current_submenu_index;
+        if (current_submenu_index < pagedFeatureCount() && wifiGlobalIndex < WIFI_INFO_COUNT) {
+            showFeatureInfoScreen(t(wifi_items[wifiGlobalIndex]),
+                                  wifi_page0_info[wifiGlobalIndex]);   // blocks until BTN_LEFT is released
+            // The info screen used the whole display; force a full submenu
+            // redraw (otherwise displaySubmenu() only does its usual
+            // incremental update and leaves info-screen pixels on screen
+            // until the next LEFT).
             submenu_initialized = false;
             last_submenu_index = -1;
             displaySubmenu();
@@ -1883,7 +1925,7 @@ void handleWiFiSubmenuButtons() {
             last_interaction_time = millis();
             displaySubmenu();
             delay(120);
-            g_pagedPage = (g_pagedPage + 1) % pagedPageCount();
+            pagedAdvancePage();
             current_submenu_index = 0;
             pagedApplyPage();
             displaySubmenu();
@@ -2228,8 +2270,10 @@ void handleBluetoothSubmenuButtons() {
         waitButtonReleased(BTN_DOWN);
     }
 
-    // RIGHT no item selecionado: abre uma tela cheia com a info (EN + PT-BR)
-    // (so nas 8 features da pagina 0, que tem texto cadastrado em bluetooth_page0_info_*).
+    // RIGHT on the selected item: opens a full-screen info page. All 9
+    // Bluetooth features have text (BT_INFO_COUNT); they all fit on a
+    // single paged-submenu page (9 == kPagedItemsPerPage), so no
+    // page-relative index math is needed here, unlike the WiFi menu.
     if (isButtonPressed(BTN_RIGHT)) {
         waitButtonReleased(BTN_RIGHT);
         if (g_pagedPage == 0 && current_submenu_index < BT_INFO_COUNT) {
@@ -2485,7 +2529,7 @@ void handleBluetoothSubmenuButtons() {
             last_interaction_time = millis();
             displaySubmenu();
             delay(120);
-            g_pagedPage = (g_pagedPage + 1) % pagedPageCount();
+            pagedAdvancePage();
             current_submenu_index = 0;
             pagedApplyPage();
             displaySubmenu();
@@ -4175,7 +4219,7 @@ void handleAboutPage() {
   tft.setTextFont(1);
   tft.setTextColor(UI_DIM_TEXT, UI_BG);
   tft.setCursor(16, 60);
-  tft.print("by ");
+  tft.print(t(STR_ABOUT_BY));
   tftPrintObf(OBF_DN, sizeof(OBF_DN));
   tft.print(" - ");
   tft.print(ESP32DIV_VERSION);
@@ -4189,7 +4233,7 @@ void handleAboutPage() {
 
   tft.setTextColor(UI_DIM_TEXT, UI_BG);
   tft.setCursor(xLabel, y);
-  tft.print("Board");
+  tft.print(t(STR_ABOUT_BOARD));
   tft.setTextColor(UI_TEXT, UI_BG);
   tft.setCursor(xValue, y);
   tft.print(ESP32DIV_BOARD_NAME);
@@ -4220,7 +4264,10 @@ void handleAboutPage() {
 
   // ---- HARDWARE section (grouped by status, from boot-time detection) ----
   // Slot modules fall into Installed (detected) or Supported (absent); the
-  // SoC/board items are fixed. Labels right-pad so the ':' column lines up.
+  // SoC/board items are fixed. The ':' column position is computed from the
+  // actual widest translated label (not a hardcoded char count) because
+  // "Unsupported" isn't the longest in every language -- PT-BR's "Nao
+  // suportado" runs longer, for instance.
   {
     String installed, supported;
     auto add = [](String& s, const char* name) {
@@ -4240,12 +4287,27 @@ void handleAboutPage() {
     tft.setCursor(16, 194);
     tft.print("HARDWARE");
 
+    const char* lblBuiltin    = t(STR_ABOUT_BUILTIN);
+    const char* lblInstalled  = t(STR_ABOUT_INSTALLED);
+    const char* lblSupported  = t(STR_ABOUT_SUPPORTED);
+    const char* lblUnsupported = t(STR_ABOUT_UNSUPPORTED);
+
     const int hwLabelX = 16;
-    const int hwColonX = 16 + 11 * 6 + 2;   // 11 chars (longest = "Unsupported")
+    int widest = tft.textWidth(lblBuiltin);
+    widest = max(widest, (int)tft.textWidth(lblInstalled));
+    widest = max(widest, (int)tft.textWidth(lblSupported));
+    widest = max(widest, (int)tft.textWidth(lblUnsupported));
+    const int hwColonX = hwLabelX + widest + 2;
     const int hwValueX = hwColonX + 8;
     int hy = 214;
-    const int hstep = 20;
+    const int hstep = 18;  // 2px tighter than the original 20, to help fit a wrapped line
 
+    // Hanging indent: when a value is too wide for the line (e.g. PT-BR's
+    // "Nao suportado" leaves less room than "Unsupported" did, which used to
+    // push "SD" off the end of the Built-in row), continuation lines start
+    // at hwValueX -- right after the ":" -- instead of TFT_eSPI's default
+    // auto-wrap, which would wrap to x=0 and crowd the next row.
+    const int valueMaxW = (tft.width() - 12) - hwValueX;
     auto row = [&](const char* label, const String& value) {
       tft.setTextColor(UI_DIM_TEXT, UI_BG);
       tft.setCursor(hwLabelX, hy);
@@ -4253,20 +4315,36 @@ void handleAboutPage() {
       tft.setCursor(hwColonX, hy);
       tft.print(":");
       tft.setTextColor(UI_TEXT, UI_BG);
-      tft.setCursor(hwValueX, hy);
-      tft.print(value);
-      hy += hstep;
+
+      String remaining = value;
+      remaining.trim();
+      do {
+        int fitLen = remaining.length();
+        while (fitLen > 0 && tft.textWidth(remaining.substring(0, fitLen)) > valueMaxW) {
+          fitLen--;
+        }
+        if (fitLen <= 0) fitLen = min((int)remaining.length(), 1);  // avoid looping forever on a single over-wide char
+        if (fitLen < (int)remaining.length()) {
+          int lastSpace = remaining.substring(0, fitLen).lastIndexOf(' ');
+          if (lastSpace > 0) fitLen = lastSpace;
+        }
+        tft.setCursor(hwValueX, hy);
+        tft.print(remaining.substring(0, fitLen));
+        remaining = remaining.substring(fitLen);
+        remaining.trim();
+        hy += hstep;
+      } while (remaining.length() > 0);
     };
 
-    row("Built-in",    "WiFi 2.4GHz, BLE, IR, SD");
-    row("Installed",   installed);
-    row("Supported",   supported);
-    row("Unsupported", "WiFi 5GHz");
+    row(lblBuiltin,     "WiFi 2.4GHz, BLE, IR, SD");
+    row(lblInstalled,   installed);
+    row(lblSupported,   supported);
+    row(lblUnsupported, "WiFi 5GHz");
   }
 
   tft.setTextColor(UI_DIM_TEXT, UI_BG);
   tft.setCursor(16, 300);
-  tft.print("SELECT / tap to go back");
+  tft.print(t(STR_ABOUT_TAP_TO_GO_BACK));
 
   while (!feature_exit_requested) {
     if (isButtonPressed(BTN_SELECT) || isButtonPressed(BTN_LEFT)) {

@@ -1,7 +1,8 @@
 #include "LangInfo.h"
 
-// Order matches wifi_items in ESP32-DIV.ino.
-const InfoText wifi_page0_info[9] = {
+// Order matches wifi_items in ESP32-DIV.ino (all 12 WIFI_FEATURE_COUNT
+// entries, spanning both paged-submenu pages -- see WIFI_INFO_COUNT).
+const InfoText wifi_page0_info[12] = {
     {"Analyzes network traffic by capturing data packets in the air, allowing you to visualize activity, protocol types, and the volume of information flowing in the environment.",
      "Analisa o trafego da rede capturando pacotes de dados no ar, permitindo visualizar a atividade, os tipos de protocolo e o volume de informacoes trafegadas no ambiente.",
      "Analiza el trafico de la red capturando paquetes de datos en el aire, permitiendo visualizar la actividad, los tipos de protocolo y el volumen de informacion que circula en el entorno."},
@@ -29,10 +30,20 @@ const InfoText wifi_page0_info[9] = {
     {"Scans nearby networks and lists only the ones with WPS enabled, a legacy pairing feature known for weak PIN implementations that can expose the Wi-Fi password.",
      "Varre as redes proximas e lista apenas as que estao com WPS ativado, um recurso de pareamento antigo conhecido por implementacoes de PIN fracas que podem expor a senha do Wi-Fi.",
      "Recorre las redes cercanas y lista solo las que tienen WPS activado, una funcion de emparejamiento antigua conocida por implementaciones de PIN debiles que pueden exponer la contrasena del Wi-Fi."},
+    {"Scans the local network by sending ARP requests to discover active devices, revealing their IP and MAC addresses even if they don't respond to other probes.",
+     "Varre a rede local enviando requisicoes ARP para descobrir dispositivos ativos, revelando os enderecos IP e MAC mesmo que eles nao respondam a outras sondagens.",
+     "Recorre la red local enviando solicitudes ARP para descubrir dispositivos activos, revelando sus direcciones IP y MAC aunque no respondan a otras sondas."},
+    {"Responds to every probe request from nearby devices, impersonating any network they have previously connected to and tricking them into auto-joining a rogue access point.",
+     "Responde a todas as solicitacoes de probe de dispositivos proximos, se passando por qualquer rede a que ja se conectaram antes, enganando-os para que se conectem automaticamente a um ponto de acesso falso.",
+     "Responde a todas las solicitudes de probe de dispositivos cercanos, haciendose pasar por cualquier red a la que ya se hayan conectado antes, enganandolos para que se conecten automaticamente a un punto de acceso falso."},
+    {"Displays a live bar graph of signal activity across all 2.4GHz channels, helping identify which channels are the most crowded or have the least interference.",
+     "Exibe um grafico de barras em tempo real da atividade de sinal em todos os canais de 2.4GHz, ajudando a identificar quais canais estao mais congestionados ou tem menos interferencia.",
+     "Muestra un grafico de barras en tiempo real de la actividad de senal en todos los canales de 2.4GHz, ayudando a identificar que canales estan mas congestionados o tienen menos interferencia."},
 };
 
-// Order matches bluetooth_items in ESP32-DIV.ino.
-const InfoText bluetooth_page0_info[8] = {
+// Order matches bluetooth_items in ESP32-DIV.ino (all 9 BT_FEATURE_COUNT
+// entries -- see BT_INFO_COUNT).
+const InfoText bluetooth_page0_info[9] = {
     {"Floods the Bluetooth spectrum attempting to disrupt and block nearby connections.",
      "Inunda o espectro Bluetooth para tentar interromper e bloquear conexoes proximas.",
      "Inunda el espectro Bluetooth intentando interrumpir y bloquear las conexiones cercanas."},
@@ -57,6 +68,9 @@ const InfoText bluetooth_page0_info[8] = {
     {"Emulates a keyboard via Bluetooth connection to rapidly inject automated commands and scripts into the target device.",
      "Emula um teclado via conexao Bluetooth para injetar comandos automaticos e scripts rapidamente no aparelho alvo.",
      "Emula un teclado mediante conexion Bluetooth para inyectar comandos automatizados y scripts rapidamente en el dispositivo objetivo."},
+    {"Scans the area for Bluetooth signal patterns typical of hidden card skimmers (e.g. on ATMs or gas pumps), alerting you if a likely skimmer device is detected nearby.",
+     "Varre a area em busca de padroes de sinal Bluetooth tipicos de skimmers escondidos (por exemplo em caixas eletronicos ou bombas de combustivel), alertando se um provavel skimmer for detectado por perto.",
+     "Recorre el area en busca de patrones de senal Bluetooth tipicos de skimmers ocultos (por ejemplo en cajeros automaticos o surtidores de combustible), alertando si se detecta un probable skimmer cerca."},
 };
 
 // Order matches nrf_submenu_items in ESP32-DIV.ino, skipping "Back to Main Menu".

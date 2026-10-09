@@ -34,10 +34,17 @@ enum StrKey : uint16_t {
   STR_TILE_IR,
   STR_TILE_RFID,
   STR_TILE_GPS,
-  STR_MAIN_MENU,            // also reused by the paged-submenu footer button
+  STR_MORE_BACK,             // "More" grid's own back tile -- short "Back", distinct
+                             // from STR_MAIN_MENU (paged-submenu footer, unchanged)
+  STR_MAIN_MENU,             // paged-submenu footer button ("Main Menu")
 
   // Shared trailing nav entry of every paged submenu list
   STR_BACK_TO_MAIN_MENU,
+
+  // Paged-submenu footer's page-advance button -- label flips between these
+  // two depending on which page we're on (pagedPageBtnLabel() in ESP32-DIV.ino)
+  STR_PAGED_NEXT_PAGE,
+  STR_PAGED_PREV_PAGE,
 
   // Settings tile's own row labels (AppSettingsUI::items in utils.cpp)
   STR_SETTINGS_BRIGHTNESS,
@@ -46,6 +53,38 @@ enum StrKey : uint16_t {
   STR_SETTINGS_NEOPIXEL,
   STR_SETTINGS_AUTO_SCAN,
   STR_SETTINGS_LANGUAGE,
+
+  // Settings screen's own footer buttons (AppSettingsUI::drawFooter() in utils.cpp)
+  STR_SETTINGS_BACK,
+  STR_SETTINGS_SAVE,
+
+  // Settings > Theme row's two values (drawThemeWidget()/rThemeDark()/rThemeLight())
+  STR_SETTINGS_THEME_DARK,
+  STR_SETTINGS_THEME_LIGHT,
+
+  // Every on/off switch row's value label (drawSwitchWidgetRow()) -- NeoPixel,
+  // Auto Scan. Kept upper-case to match the original "ON"/"OFF" styling.
+  STR_SETTINGS_ON,
+  STR_SETTINGS_OFF,
+
+  // Settings > Accent row's color names (accentPresetName() in SettingsStore.cpp)
+  STR_ACCENT_ORANGE,
+  STR_ACCENT_GREEN,
+  STR_ACCENT_RED,
+  STR_ACCENT_CYAN,
+  STR_ACCENT_PURPLE,
+  STR_ACCENT_YELLOW,
+  STR_ACCENT_WHITE,
+
+  // About screen (handleAboutPage() in ESP32-DIV.ino) -- "GitHub"/"Web"/"Mail"
+  // labels stay untranslated (proper nouns), not keyed.
+  STR_ABOUT_BY,              // "by " prefix before the obfuscated developer name
+  STR_ABOUT_BOARD,
+  STR_ABOUT_BUILTIN,
+  STR_ABOUT_INSTALLED,
+  STR_ABOUT_SUPPORTED,
+  STR_ABOUT_UNSUPPORTED,
+  STR_ABOUT_TAP_TO_GO_BACK,
 
   // WiFi features (wifi_items, WIFI_FEATURE_COUNT)
   STR_WIFI_PACKET_MONITOR,
