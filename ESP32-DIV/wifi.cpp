@@ -10418,7 +10418,7 @@ void channelGraphLoop() {
   handleTabBarFallbackTouch();
 
   // Passive auto-rescan so the graph stays live without the user tapping
-  // Rescan every time (mirrors the WiFi Scanner's own background refresh).
+  // Rescan every time (mirrors the WiFi 2.4GHz Scanner's own background refresh).
   if (!s_scanning && (millis() - s_lastAutoScanMs > AUTO_RESCAN_MS)) {
     startScan();
   }
@@ -10806,16 +10806,18 @@ static bool fwActionPressed(const char* label, int x = 0, int y = 0, bool touchV
   }
   if (featureHasTouchNavBar()) {
     if (strcmp(label, "Back") == 0 || strcmp(label, "Exit") == 0 || strcmp(label, "Cancel") == 0) {
-      return isTouchNavButtonPressedEdge(BTN_LEFT);
+      return isButtonPressedEdge(BTN_LEFT);
     }
     if (strcmp(label, "Start") == 0 || strcmp(label, "OK") == 0 || strcmp(label, "Rescan") == 0) {
-      return isTouchNavButtonPressedEdge(BTN_SELECT);
+      return isButtonPressedEdge(BTN_SELECT);
     }
     if (strcmp(label, "Prev") == 0) {
-      return isTouchNavButtonPressedEdge(BTN_UP);
+      return isButtonPressedEdge(BTN_UP);
     }
+    // Remapped layout: Next always sits on DOWN (was RIGHT; Prev/Next
+    // always sit on UP/DOWN).
     if (strcmp(label, "Next") == 0) {
-      return isTouchNavButtonPressedEdge(BTN_RIGHT);
+      return isButtonPressedEdge(BTN_DOWN);
     }
     return false;
   }
@@ -10827,7 +10829,7 @@ static void fwApplyTabNavLabels(const char* leftButton, const char* prevButton,
   const char* left = nullptr;
   const char* center = nullptr;
   const char* up = nullptr;
-  const char* right = nullptr;
+  const char* down = nullptr;
   auto assign = [&](const char* btn) {
     if (!btn || !btn[0]) {
       return;
@@ -10839,13 +10841,14 @@ static void fwApplyTabNavLabels(const char* leftButton, const char* prevButton,
     } else if (strcmp(btn, "Prev") == 0) {
       up = btn;
     } else if (strcmp(btn, "Next") == 0) {
-      right = btn;
+      // Remapped layout: Next always sits on DOWN (was RIGHT).
+      down = btn;
     }
   };
   assign(leftButton);
   assign(prevButton);
   assign(nextButton);
-  fwUpdateNavLabels(left, nullptr, center, up, right);
+  fwUpdateNavLabels(left, down, center, up, nullptr);
 }
 
 static void fwDrawFooterButtons() {
@@ -11028,8 +11031,10 @@ void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButto
 
 static void drawNetworkTabBar(bool prevDisabled, bool nextDisabled) {
   if (featureHasTouchNavBar()) {
-    fwUpdateNavLabels("Back", nullptr, "Rescan", prevDisabled ? nullptr : "Prev",
-                      nextDisabled ? nullptr : "Next");
+    // Remapped layout: Next always sits on DOWN (was RIGHT; Prev/Next
+    // always sit on UP/DOWN).
+    fwUpdateNavLabels("Back", nextDisabled ? nullptr : "Next", "Rescan",
+                      prevDisabled ? nullptr : "Prev", nullptr);
     return;
   }
   FeatureUI::drawFooterBg();
@@ -11826,11 +11831,12 @@ void updateLoop() {
 
   if (featureHasTouchNavBar()) {
     maintainTouchNavBar();
-    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    if (isButtonPressedEdge(BTN_LEFT)) {
       feature_exit_requested = true;
       return;
     }
-  } else if (feature_active && isButtonPressed(BTN_SELECT)) {
+  } else if (feature_active && isButtonPressed(BTN_LEFT)) {
+    // Remapped layout: LEFT exits now (was SELECT).
     feature_exit_requested = true;
     return;
   }

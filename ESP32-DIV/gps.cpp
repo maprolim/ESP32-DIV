@@ -133,7 +133,6 @@ ViewMode viewMode = ViewMode::Combined;
 int listScroll = 0;
 uint32_t lastViewBtnMs = 0;
 
-static bool prevHwLeft = false;
 static bool prevHwRight = false;
 static bool prevHwUp = false;
 static bool prevHwDown = false;
@@ -908,7 +907,9 @@ static inline bool navCooldownElapsed(uint32_t t) {
 }
 
 static void resetSatScannerNavInputState() {
-  prevHwLeft = isButtonPressed(BTN_LEFT);
+  // Physical LEFT is the universal Exit now (handled in shouldExit()), so it
+  // no longer drives the view-mode cycle here -- only RIGHT does (forward
+  // only; the touch edge-tap gesture below is still bidirectional).
   prevHwRight = isButtonPressed(BTN_RIGHT);
   prevHwUp = isButtonPressed(BTN_UP);
   prevHwDown = isButtonPressed(BTN_DOWN);
@@ -929,17 +930,14 @@ bool pollViewNavigation() {
     redraw = true;
   };
 
-  const bool L = isButtonPressed(BTN_LEFT);
   const bool R = isButtonPressed(BTN_RIGHT);
   const bool U = isButtonPressed(BTN_UP);
   const bool D = isButtonPressed(BTN_DOWN);
 
-  const bool edgeL = L && !prevHwLeft;
   const bool edgeR = R && !prevHwRight;
   const bool edgeU = U && !prevHwUp;
   const bool edgeD = D && !prevHwDown;
 
-  prevHwLeft = L;
   prevHwRight = R;
   prevHwUp = U;
   prevHwDown = D;
@@ -947,8 +945,6 @@ bool pollViewNavigation() {
   if (navCooldownElapsed(t)) {
     if (edgeR) {
       bumpMode(1);
-    } else if (edgeL) {
-      bumpMode(-1);
     } else if (viewMode == ViewMode::ListOnly && edgeU) {
       if (listScroll > 0) {
         listScroll--;
@@ -1226,14 +1222,15 @@ bool touchRequestsExit() {
 }
 
 bool shouldExit() {
-  return feature_exit_requested || isButtonPressed(BTN_SELECT) ||
+  // Remapped layout: LEFT exits now (was SELECT).
+  return feature_exit_requested || isButtonPressed(BTN_LEFT) ||
          touchRequestsExit();
 }
 
 void drainButtons() {
   delay(180);
   for (int i = 0; i < 80; i++) {
-    if (!isButtonPressed(BTN_SELECT)) {
+    if (!isButtonPressed(BTN_LEFT)) {
       break;
     }
     delay(10);
@@ -1483,7 +1480,9 @@ static void wardSetNavLabels(WardPage page, bool bgOn = false, bool logOn = fals
   }
   switch (page) {
     case WardPage::Main:
-      setTouchNavLabels("Setup", logOn ? "Pause" : "Log", "Exit", nullptr,
+      // Remapped layout: LEFT=Exit (was Setup), SELECT=Setup (the most
+      // important action, since it opens the Settings page; was Exit).
+      setTouchNavLabels("Exit", logOn ? "Pause" : "Log", "Setup", nullptr,
                         bgOn ? "Stop" : "RSS");
       break;
     case WardPage::Settings:
@@ -1503,14 +1502,16 @@ static WardNavEvt wardPollNavButtons(WardPage page) {
     return WardNavEvt::None;
   }
   if (page == WardPage::Main) {
+    // Remapped layout: LEFT=Exit (was Setup), SELECT=Setup (the most
+    // important action, since it opens the Settings page; was Exit).
     if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
-      return WardNavEvt::Setup;
+      return WardNavEvt::Exit;
     }
     if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
       return WardNavEvt::LogToggle;
     }
     if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
-      return WardNavEvt::Exit;
+      return WardNavEvt::Setup;
     }
     if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
       return WardNavEvt::Rss;
@@ -3579,15 +3580,19 @@ static int wardPollSettingsCombinedHit() {
   return 10 + h;
 }
 
-static bool wardSessionShouldExit() {
+static bool wardSessionShouldExit(WardPage page) {
   if (feature_exit_requested) {
     return true;
   }
+  // Remapped layout: LEFT is the universal Exit now (was SELECT, which on
+  // the Main page now opens Setup instead -- see wardPollNavButtons()).
+  // On Settings/WigleCfg, LEFT is Back, which wardPollNavButtons() already
+  // routes to WardNavEvt::Back without tearing down the whole session, so
+  // this raw check only needs to catch Main (no dedicated Back event there).
   if (featureHasTouchNavBar()) {
-    /* Center nav is Save or Exit by page — use wardPollNavButtons, not raw SELECT. */
-    return isPhysicalButtonPressed(BTN_SELECT);
+    return page == WardPage::Main && isPhysicalButtonPressed(BTN_LEFT);
   }
-  return isButtonPressed(BTN_SELECT) || touchRequestsExit();
+  return isButtonPressed(BTN_LEFT) || touchRequestsExit();
 }
 
 void session() {
@@ -3686,7 +3691,7 @@ void session() {
   while (true) {
     gWardSuppressBottomTouchExit = (page != WardPage::Main);
     wardPumpNavChrome();
-    if (wardSessionShouldExit()) {
+    if (wardSessionShouldExit(page)) {
       break;
     }
     if (!bgWas) {

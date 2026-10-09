@@ -41,11 +41,18 @@ static void irRedrawNavChrome() {
 }
 
 static void irSetCaptureNavLabels() {
-  setTouchNavLabels("Rep-", "Save", "Exit", "Send", "Rep+");
+  // Remapped layout: LEFT=Exit (was Rep-), SELECT=Send (the most important
+  // action, was on UP with Exit on center), UP=Rep- (was LEFT), DOWN=Rep+
+  // (was RIGHT; Rep-/Rep+ is a Prev/Next-style pair, always on UP/DOWN),
+  // RIGHT=Save (secondary, was DOWN).
+  setTouchNavLabels("Exit", "Rep+", "Send", "Rep-", "Save");
 }
 
 static void irSetSavedNavLabels() {
-  setTouchNavLabels("Delete", "Next", "Exit", "Prev", "TX");
+  // Remapped layout: LEFT=Exit (was Delete), SELECT=TX (the most important
+  // action, was RIGHT; Exit was on center), RIGHT=Delete (secondary, was
+  // LEFT). Prev/Next were already correctly on UP/DOWN.
+  setTouchNavLabels("Exit", "Next", "TX", "Prev", "Delete");
 }
 
 static void irSetUniversalRemoteNavLabels() {
@@ -916,23 +923,29 @@ static void handleTouchNavButtons() {
     return;
   }
 
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+  // Remapped layout: SELECT=Send (the most important action, was UP), UP=
+  // Rep- (was LEFT), DOWN=Rep+ (was RIGHT; Rep-/Rep+ always sit on UP/DOWN),
+  // RIGHT=Save (secondary, was DOWN). LEFT is the universal Exit. Also
+  // switched from isTouchNavButtonPressedEdge (touch-tap only) to
+  // isButtonPressedEdge so the physical buttons actually trigger these
+  // actions too.
+  if (isButtonPressedEdge(BTN_UP)) {
     s_autoTx = false;
     if (s_repeat > 1) s_repeat--;
     s_contentDirty = true;
     irUpdateStatusPanel(true);
   }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_DOWN)) {
     s_autoTx = false;
     if (s_repeat < 10) s_repeat++;
     s_contentDirty = true;
     irUpdateStatusPanel(true);
   }
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+  if (isButtonPressedEdge(BTN_SELECT)) {
     s_autoTx = false;
     if (s_hasCapture) tryReplay();
   }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     if (s_hasCapture) saveCapture();
   }
 }
@@ -1276,7 +1289,8 @@ void setup() {
 
 void loop() {
 
-  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+  // Remapped layout: LEFT exits now (was SELECT).
+  if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
     feature_exit_requested = true;
     return;
   }
@@ -1328,42 +1342,10 @@ void loop() {
     }
   }
 
-  static unsigned long lastDebounceTime = 0;
-  const unsigned long debounceDelay = 200;
-  static bool prevLeft=false, prevRight=false, prevUp=false, prevDown=false;
-  const bool leftPressed  = isPhysicalButtonPressed(BTN_LEFT);
-  const bool rightPressed = isPhysicalButtonPressed(BTN_RIGHT);
-  const bool upPressed    = isPhysicalButtonPressed(BTN_UP);
-  const bool downPressed  = isPhysicalButtonPressed(BTN_DOWN);
-
-  if (rightPressed && !prevRight && millis() - lastDebounceTime > debounceDelay) {
-    s_autoTx = false;
-    if (s_repeat < 10) s_repeat++;
-    s_contentDirty = true;
-    irUpdateStatusPanel(true);
-    lastDebounceTime = millis();
-  }
-  if (leftPressed && !prevLeft && millis() - lastDebounceTime > debounceDelay) {
-    s_autoTx = false;
-    if (s_repeat > 1) s_repeat--;
-    s_contentDirty = true;
-    irUpdateStatusPanel(true);
-    lastDebounceTime = millis();
-  }
-  if (upPressed && !prevUp && s_hasCapture && millis() - lastDebounceTime > debounceDelay) {
-    s_autoTx = false;
-    tryReplay();
-    lastDebounceTime = millis();
-  }
-  if (downPressed && !prevDown && s_hasCapture && millis() - lastDebounceTime > debounceDelay) {
-    saveCapture();
-    lastDebounceTime = millis();
-  }
-
-  prevLeft = leftPressed;
-  prevRight = rightPressed;
-  prevUp = upPressed;
-  prevDown = downPressed;
+  // handleTouchNavButtons() now reads isButtonPressedEdge() (physical OR
+  // touch-nav, see its own comment), which made the raw
+  // isPhysicalButtonPressed() block that used to live here (and
+  // duplicated/conflicted with it) redundant -- removed.
 
   if (s_autoTx && s_hasCapture) {
     uint32_t now = millis();
@@ -1758,16 +1740,21 @@ static void handleTouchNavButtons() {
     return;
   }
 
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
-    if (irTotal > 0) deleteProfile(currentIndex);
-  }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+  // Remapped layout: LEFT=Exit (was Delete), SELECT=TX (the most important
+  // action, was RIGHT), RIGHT=Delete (secondary, was LEFT). Prev/Next were
+  // already correctly on UP/DOWN. Also switched from
+  // isTouchNavButtonPressedEdge (touch-tap only) to isButtonPressedEdge so
+  // the physical buttons actually trigger these actions too.
+  if (isButtonPressedEdge(BTN_DOWN)) {
     selectNext();
   }
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+  if (isButtonPressedEdge(BTN_UP)) {
     selectPrev();
   }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    if (irTotal > 0) deleteProfile(currentIndex);
+  }
+  if (isButtonPressedEdge(BTN_SELECT)) {
     if (irTotal > 0) transmitProfile(currentIndex);
   }
 }
@@ -1978,7 +1965,8 @@ void setup() {
 }
 
 void loop() {
-  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+  // Remapped layout: LEFT exits now (was SELECT).
+  if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
     feature_exit_requested = true;
     return;
   }
@@ -1989,51 +1977,17 @@ void loop() {
     tft.drawFastHLine(0, 20, 240, UI_LINE);
     tft.drawFastHLine(0, 36, 240, UI_LINE);
   }
+  // handleTouchNavButtons() now reads isButtonPressedEdge() (physical OR
+  // touch-nav, see its own comment), which made the raw
+  // isPhysicalButtonPressed() block that used to live here (and
+  // duplicated/conflicted with it) redundant -- removed.
   handleTouchNavButtons();
 
-  static unsigned long lastDebounceTime = 0;
-  const unsigned long debounceDelay = 200;
-  static bool prevUp = false;
-  static bool prevDown = false;
-  static bool prevRight = false;
-  static bool prevLeft = false;
-
-  bool prevPressed    = isPhysicalButtonPressed(BTN_UP);
-  bool nextPressed    = isPhysicalButtonPressed(BTN_DOWN);
-  bool txPressed      = isPhysicalButtonPressed(BTN_RIGHT);
-  bool deletePressed  = isPhysicalButtonPressed(BTN_LEFT);
-
-  if (irTotal > 0) {
-
-    if (nextPressed && !prevDown && millis() - lastDebounceTime > debounceDelay) {
-      selectNext();
-      lastDebounceTime = millis();
-    }
-
-    if (prevPressed && !prevUp && millis() - lastDebounceTime > debounceDelay) {
-      selectPrev();
-      lastDebounceTime = millis();
-    }
-
-    if (txPressed && !prevRight && millis() - lastDebounceTime > debounceDelay) {
-      transmitProfile(currentIndex);
-      lastDebounceTime = millis();
-    }
-
-    if (deletePressed && !prevLeft && millis() - lastDebounceTime > debounceDelay) {
-      deleteProfile(currentIndex);
-      lastDebounceTime = millis();
-    }
-  } else {
+  if (irTotal == 0) {
     tft.setCursor(10, 50 + yshift);
     tft.setTextColor(UI_TEXT, FEATURE_BG);
     tft.print(sdLastErr.length() ? sdLastErr : "No profiles on SD.");
   }
-
-  prevUp = prevPressed;
-  prevDown = nextPressed;
-  prevRight = txPressed;
-  prevLeft = deletePressed;
 }
 
 }
@@ -2599,8 +2553,8 @@ static bool loadProfilesFromSd(String* errOut = nullptr) {
     }
   }
 
-  if (s_sdCount == 0) { if (errOut) *errOut = "Nenhum perfil no SD"; return false; }
-  if (errOut) *errOut = String(s_sdCount) + " do SD";
+  if (s_sdCount == 0) { if (errOut) *errOut = "No profiles on SD"; return false; }
+  if (errOut) *errOut = String(s_sdCount) + " from SD";
   return true;
 }
 
@@ -2712,9 +2666,9 @@ static int firstSelectable() {
 static void rebuildRows() {
   s_rows.clear();
   if (!s_recent.empty()) {
-    s_rows.push_back({ -1, true, "Recentes" });
+    s_rows.push_back({ -1, true, "Recent" });
     for (int idx : s_recent) s_rows.push_back({ idx, false, nullptr });
-    s_rows.push_back({ -1, true, "Todos" });
+    s_rows.push_back({ -1, true, "All" });
   }
   for (int idx : s_order) s_rows.push_back({ idx, false, nullptr });
   if (s_sel < 0 || s_sel >= (int)s_rows.size() || s_rows[s_sel].header) s_sel = firstSelectable();
@@ -2754,7 +2708,7 @@ static void drawList() {
   if (s_rows.empty()) {
     tft.setTextColor(UI_WARN, FEATURE_BG);
     tft.setCursor(kPadX, listTopY() + 4);
-    tft.print(s_lastErr.length() ? s_lastErr : "Sem controles");
+    tft.print(s_lastErr.length() ? s_lastErr : "No remotes");
     return;
   }
 
@@ -2819,14 +2773,14 @@ static void drawDetails() {
   int nk = 0;
   for (int i = 0; i < (int)KeyCount; i++) if (p.has[i]) nk++;
 
-  line("Nome:",      p.name, UI_TEXT);
-  line("Modelo:",    p.model, UI_TEXT);
-  line("Marca:",     p.brand, UI_TEXT);
-  line("Tipo:",      p.category, UI_TEXT);
-  line("Protocolo:", String(typeToString(p.proto)), UI_TEXT);
-  line("Bits:",      String((unsigned)p.bits), UI_TEXT);
-  line("Fonte:",     p.fromSd ? String("SD card") : String("Built-in"), p.fromSd ? UI_OK : UI_DIM_TEXT);
-  line("Teclas:",    String(nk) + "/" + String((int)KeyCount), UI_TEXT);
+  line("Name:",     p.name, UI_TEXT);
+  line("Model:",    p.model, UI_TEXT);
+  line("Brand:",    p.brand, UI_TEXT);
+  line("Type:",     p.category, UI_TEXT);
+  line("Protocol:", String(typeToString(p.proto)), UI_TEXT);
+  line("Bits:",     String((unsigned)p.bits), UI_TEXT);
+  line("Source:",   p.fromSd ? String("SD card") : String("Built-in"), p.fromSd ? UI_OK : UI_DIM_TEXT);
+  line("Keys:",     String(nk) + "/" + String((int)KeyCount), UI_TEXT);
 }
 
 static void layoutKeyButtons() {
@@ -2904,11 +2858,11 @@ static void drawControl() {
 
 static void drawFooter() {
   if (s_screen == Screen::List)
-    setTouchNavLabels("Voltar", "Baixo", "Load", "Cima", "Detalhes");
+    setTouchNavLabels("Back", "Next", "Load", "Prev", "Details");
   else if (s_screen == Screen::Details)
-    setTouchNavLabels("Voltar", "", "", "", "");
+    setTouchNavLabels("Back", "", "", "", "");
   else
-    setTouchNavLabels("Voltar", "", "OK", "", "");
+    setTouchNavLabels("Back", "", "OK", "", "");
   irRedrawNavChrome();
 }
 
@@ -3291,7 +3245,7 @@ static void refreshAc() {
   s_profs.clear();
   loadBuiltinAc();
   s_loadedSd = loadAcFromSd();
-  s_lastErr = s_loadedSd ? (String(s_sdCount) + " do SD") : String("SD: nenhum");
+  s_lastErr = s_loadedSd ? (String(s_sdCount) + " from SD") : String("SD: none");
   if (s_profIdx < 0 || s_profIdx >= (int)s_profs.size()) s_profIdx = 0;
 }
 
@@ -3462,9 +3416,9 @@ static int firstSelectable() {
 static void rebuildRows() {
   s_rows.clear();
   if (!s_recent.empty()) {
-    s_rows.push_back({ -1, true, "Recentes" });
+    s_rows.push_back({ -1, true, "Recent" });
     for (int idx : s_recent) s_rows.push_back({ idx, false, nullptr });
-    s_rows.push_back({ -1, true, "Todos" });
+    s_rows.push_back({ -1, true, "All" });
   }
   for (int idx : s_order) s_rows.push_back({ idx, false, nullptr });
   if (s_sel < 0 || s_sel >= (int)s_rows.size() || s_rows[s_sel].header) s_sel = firstSelectable();
@@ -3499,7 +3453,7 @@ static void drawList() {
   if (s_rows.empty()) {
     tft.setTextColor(UI_WARN, FEATURE_BG);
     tft.setCursor(kPadX, listTopY() + 4);
-    tft.print("Sem controles A/C");
+    tft.print("No A/C remotes");
     return;
   }
   ensureVisible();
@@ -3550,13 +3504,13 @@ static void drawDetails() {
     tft.print(acTrunc(val.length() ? val : String("-"), 240 - valX - kPadX));
     y += step;
   };
-  line("Nome:",     p.name, UI_TEXT);
-  line("Marca:",    p.brand, UI_TEXT);
-  line("Modelo:",   String(lgModelName(p.lgModel)), UI_OK);
-  line("Protocolo:",String(lgProtoName(p.lgModel)), UI_TEXT);
+  line("Name:",     p.name, UI_TEXT);
+  line("Brand:",    p.brand, UI_TEXT);
+  line("Model:",    String(lgModelName(p.lgModel)), UI_OK);
+  line("Protocol:", String(lgProtoName(p.lgModel)), UI_TEXT);
   line("Temp:",     String(kLgAcMinTemp) + "-" + String(kLgAcMaxTemp) + "C", UI_TEXT);
-  line("Modos:",    "Cool/Dry/Fan/Auto/Heat", UI_TEXT);
-  line("Fonte:",    p.fromSd ? String("SD card") : String("Built-in"), p.fromSd ? UI_OK : UI_DIM_TEXT);
+  line("Modes:",    "Cool/Dry/Fan/Auto/Heat", UI_TEXT);
+  line("Source:",   p.fromSd ? String("SD card") : String("Built-in"), p.fromSd ? UI_OK : UI_DIM_TEXT);
 }
 
 // Desenha um botao do controle AC; selecionado = Primary (vermelho, como o PWR).
@@ -3598,8 +3552,8 @@ static void drawControl() {
   tft.print(acTrunc(p.name, 240 - 2 * kPadX));
   String stline = s_st.power
       ? (String(modeName(s_st.mode)) + "  " + String(s_st.temp) + "C  Fan:" + fanName(s_st.fan)
-         + (s_swingIdx >= 0 ? (String("  Aba#") + String(s_swingIdx + 1)) : String("")))
-      : String("Desligado");
+         + (s_swingIdx >= 0 ? (String("  Swing#") + String(s_swingIdx + 1)) : String("")))
+      : String("Off");
   tft.setTextColor(s_st.power ? UI_OK : UI_DIM_TEXT, FEATURE_BG);
   tft.setCursor(kPadX, kBodyTop + 13);
   tft.print(acTrunc(stline, 240 - 2 * kPadX));
@@ -3609,11 +3563,11 @@ static void drawControl() {
 
 static void drawFooter() {
   if (s_scr == AScreen::List)
-    setTouchNavLabels("Voltar", "Baixo", "Load", "Cima", "Detalhes");
+    setTouchNavLabels("Back", "Next", "Load", "Prev", "Details");
   else if (s_scr == AScreen::Details)
-    setTouchNavLabels("Voltar", "", "", "", "");
+    setTouchNavLabels("Back", "", "", "", "");
   else
-    setTouchNavLabels("Voltar", "", "OK", "", "");
+    setTouchNavLabels("Back", "", "OK", "", "");
   irRedrawNavChrome();
 }
 

@@ -433,7 +433,8 @@ static void rfidSetListenNavLabels(const char* actionLabel, bool withInfo = fals
 
 static void rfidSetInfoOverlayNavLabels(int pageCount) {
   if (pageCount > 1) {
-    setTouchNavLabels("Back", "Prev", "Back", "Next", nullptr);
+    // Remapped: Prev/Next always sit on UP/DOWN (was swapped).
+    setTouchNavLabels("Back", "Next", "Back", "Prev", nullptr);
   } else {
     setTouchNavLabels("Back", nullptr, "Back", nullptr, nullptr);
   }
@@ -1133,15 +1134,18 @@ static void rfidShowInfoPanel() {
       rfidReleaseNavButtons();
       break;
     }
-    if (pageCount > 1 && isButtonPressed(BTN_UP) && page < pageCount - 1) {
+    // Remapped: Prev/Next always sit on UP/DOWN -- UP now goes to the
+    // previous page (was Next/page++), DOWN now goes to the next page (was
+    // Prev/page--).
+    if (pageCount > 1 && isButtonPressed(BTN_UP) && page > 0) {
       rfidReleaseNavButtons();
-      page++;
+      page--;
       redraw = true;
       continue;
     }
-    if (pageCount > 1 && isButtonPressed(BTN_DOWN) && page > 0) {
+    if (pageCount > 1 && isButtonPressed(BTN_DOWN) && page < pageCount - 1) {
       rfidReleaseNavButtons();
-      page--;
+      page++;
       redraw = true;
       continue;
     }
@@ -1151,15 +1155,15 @@ static void rfidShowInfoPanel() {
         rfidReleaseNavButtons();
         break;
       }
-      if (pageCount > 1 && isTouchNavButtonPressedEdge(BTN_UP) && page < pageCount - 1) {
+      if (pageCount > 1 && isTouchNavButtonPressedEdge(BTN_UP) && page > 0) {
         rfidReleaseNavButtons();
-        page++;
+        page--;
         redraw = true;
         continue;
       }
-      if (pageCount > 1 && isTouchNavButtonPressedEdge(BTN_DOWN) && page > 0) {
+      if (pageCount > 1 && isTouchNavButtonPressedEdge(BTN_DOWN) && page < pageCount - 1) {
         rfidReleaseNavButtons();
-        page--;
+        page++;
         redraw = true;
         continue;
       }

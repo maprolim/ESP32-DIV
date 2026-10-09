@@ -100,32 +100,58 @@ static void bleClearBody(uint16_t color = TFT_BLACK) {
   }
 }
 
+// Remapped layout: LEFT is always Exit; SELECT always carries the screen's
+// single most important action.
 static void bleSetExitOnlyNavLabels() {
-  setTouchNavLabels(nullptr, nullptr, "Exit", nullptr, nullptr);
+  setTouchNavLabels("Exit", nullptr, nullptr, nullptr, nullptr);
 }
 
 static void bleSetJammerNavLabels() {
-  setTouchNavLabels("Mode-", nullptr, "Exit", "Toggle", "Mode+");
+  setTouchNavLabels("Exit", nullptr, "Toggle", nullptr, "Mode");
+}
+
+static void bleSetProkillNavLabels() {
+  // Remapped layout: LEFT=Exit (was Mode-), SELECT=Toggle on/off (was UP --
+  // the most important action), UP=Mode- (was LEFT; Prev/Next-style pairs
+  // always sit on UP/DOWN), DOWN=Mode+ (was RIGHT).
+  setTouchNavLabels("Exit", "Mode+", "Toggle", "Mode-", nullptr);
 }
 
 static void bleSetScannerNavLabels() {
-  setTouchNavLabels("Cal", "Scan", "Exit", nullptr, nullptr);
+  // Remapped layout: LEFT=Exit (was Cal), SELECT=Scan (the most important
+  // action, was Exit), RIGHT=Cal (secondary, was LEFT).
+  setTouchNavLabels("Exit", nullptr, "Scan", nullptr, "Cal");
 }
 
 static void bleSetEsbNavLabels() {
-  setTouchNavLabels("Ch-", "Log", "Exit", "Hop", "Ch+");
+  // Remapped layout: LEFT=Exit (was Ch-), SELECT=Hop (toggle channel
+  // hopping -- the most important action, was Hop on UP already but Exit
+  // was on center), UP=Ch- (was LEFT), DOWN=Ch+ (was RIGHT; Ch-/Ch+ is a
+  // Prev/Next-style pair, always on UP/DOWN), RIGHT=Log (secondary, was DOWN).
+  setTouchNavLabels("Exit", "Ch+", "Hop", "Ch-", "Log");
 }
 
 static void bleSetEsbReplayNavLabels() {
-  setTouchNavLabels("Prev", "Arm", "Exit", "Play", "Next");
+  // Remapped layout: LEFT=Exit (was Prev), SELECT=Play (the most important
+  // action, was on UP with Exit on center), UP=Prev (was LEFT), DOWN=Next
+  // (was RIGHT; Prev/Next always sit on UP/DOWN), RIGHT=Arm/long-press
+  // Clear (secondary, was DOWN).
+  setTouchNavLabels("Exit", "Next", "Play", "Prev", "Arm");
 }
 
 static void bleSetMouseJackNavLabels() {
-  setTouchNavLabels("Clr", "Pause", "Exit", nullptr, nullptr);
+  // Remapped layout: LEFT=Exit (was Clear), SELECT=Pause (the most
+  // important action, was on DOWN with Exit on center), RIGHT=Clear
+  // (secondary, was LEFT).
+  setTouchNavLabels("Exit", nullptr, "Pause", nullptr, "Clr");
 }
 
 static void bleSetMjInjectNavLabels() {
-  setTouchNavLabels("Prev", "Pay", "Exit", "Fire", "Next");
+  // Remapped layout: LEFT=Exit (was Prev), SELECT=Fire (the most important
+  // action, was on UP with Exit on center), UP=Prev (was LEFT), DOWN=Next
+  // (was RIGHT; Prev/Next always sit on UP/DOWN), RIGHT=Pay (secondary,
+  // was DOWN).
+  setTouchNavLabels("Exit", "Next", "Fire", "Prev", "Pay");
 }
 
 static constexpr unsigned long kBleNavDebounceMs = 200;
@@ -151,7 +177,11 @@ namespace ProtoKill { void prokillHandleNavButtons(); }
 namespace EsbSniffer { void esbHandleNavButtons(); }
 
 static void bleSetSpooferNavLabels() {
-  setTouchNavLabels("Prev", "Type", "Exit", "Power", "Next");
+  // Remapped layout: LEFT=Exit (was device type -), SELECT=Power
+  // (toggle advertising -- the most important action, was UP), UP=device
+  // type - / Prev (was LEFT), DOWN=device type + / Next (was RIGHT;
+  // Prev/Next always sit on UP/DOWN), RIGHT=adv type (was DOWN).
+  setTouchNavLabels("Exit", "Next", "Power", "Prev", "Type");
 }
 
 namespace BleSpoofer {
@@ -191,7 +221,6 @@ int lastButtonStateAdvNext = LOW;
 int lastButtonStateAdvPrev = LOW;
 
 unsigned long lastDebounceTime = 0;
-unsigned long debounceDelay = 500;
 
 bool isAdvertising = false;
 
@@ -698,25 +727,6 @@ void setAdvertisingData() {
   }
 }
 
-void handleButtonPress(int pin, void (*callback)()) {
-  static unsigned long lastPressTime[8] = {0};
-  static uint8_t lastState[8] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
-
-  int index = pin % 8;
-  uint8_t currentState = isButtonPressed(pin) ? LOW : HIGH;
-
-  if (currentState == LOW && lastState[index] == HIGH) {
-    unsigned long currentTime = millis();
-
-    if ((currentTime - lastPressTime[index]) > debounceDelay) {
-      callback();
-      lastPressTime[index] = currentTime;
-    }
-  }
-
-  lastState[index] = currentState;
-}
-
 void changeDeviceTypeNext() {
   deviceType++;
   if (deviceType > 21) deviceType = 1;
@@ -928,7 +938,11 @@ void spooferLoop() {
   if (now - lastUpdate >= updateInterval) {
     lastUpdate = now;
 
-    if (feature_active && isButtonPressed(BTN_SELECT)) {
+    // Remapped layout: LEFT=Exit (was device type -), SELECT=toggle
+    // advertising (the most important action, was UP). UP=device type -
+    // /Prev (was LEFT), DOWN=device type +/Next (was RIGHT; Prev/Next
+    // always sit on UP/DOWN), RIGHT=adv type (was DOWN).
+    if (feature_active && isButtonPressed(BTN_LEFT)) {
       feature_exit_requested = true;
       return;
     }
@@ -936,11 +950,16 @@ void spooferLoop() {
     runUI();
     tft.drawFastHLine(0, 19, 240, UI_LINE);
 
-    handleButtonPress(BTN_RIGHT, changeDeviceTypeNext);
-    handleButtonPress(BTN_LEFT, changeDeviceTypePrev);
+    // Edge-detected through the centrally debounced isButtonPressedEdge()
+    // (~25ms lockout) instead of the old hand-rolled 500ms-locked
+    // handleButtonPress() -- that extra lockout was long enough to drop a
+    // legitimate quick second press (e.g. mashing Next/Prev), not just
+    // contact bounce.
+    if (isButtonPressedEdge(BTN_DOWN))   changeDeviceTypeNext();
+    if (isButtonPressedEdge(BTN_UP))     changeDeviceTypePrev();
 
-    handleButtonPress(BTN_DOWN, changeAdvTypeNext);
-    handleButtonPress(BTN_UP, toggleAdvertising);
+    if (isButtonPressedEdge(BTN_RIGHT))  changeAdvTypeNext();
+    if (isButtonPressedEdge(BTN_SELECT)) toggleAdvertising();
   }
 }
 
@@ -1155,7 +1174,9 @@ void sourappleSetup() {
 
 void sourappleLoop() {
 
-  if (feature_active && featureExitButtonPressed()) {
+  // Remapped layout: LEFT exits now (was SELECT via featureExitButtonPressed()).
+  // This feature has no other action.
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
     feature_exit_requested = true;
     return;
   }
@@ -1280,9 +1301,11 @@ static void updateNavLabels() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  setTouchNavLabels(s_running ? "Stop" : "Start",
+  // Remapped layout: LEFT=Exit (was Start/Stop), SELECT=Start/Stop (the most
+  // important action, was Exit). DOWN=Model, unchanged.
+  setTouchNavLabels("Exit",
                     "Model",
-                    "Exit",
+                    s_running ? "Stop" : "Start",
                     nullptr,
                     nullptr);
   redrawTouchButtonBar();
@@ -1611,14 +1634,17 @@ static void runUI() {
 static void handleButtons() {
   const unsigned long now = millis();
   if (now - s_lastBtnMs < BTN_DEBOUNCE_MS) {
-    (void)isButtonPressedEdge(BTN_LEFT);
+    (void)isButtonPressedEdge(BTN_SELECT);
     (void)isButtonPressedEdge(BTN_RIGHT);
     (void)isButtonPressedEdge(BTN_UP);
     (void)isButtonPressedEdge(BTN_DOWN);
     return;
   }
 
-  if (isButtonPressedEdge(BTN_LEFT)) {
+  // Remapped layout: SELECT is now Start/Stop (the most important action,
+  // was LEFT). LEFT is the universal Exit, handled as a level check in
+  // airTagLoop().
+  if (isButtonPressedEdge(BTN_SELECT)) {
     if (s_running) {
       stopAdvertising();
     } else {
@@ -1700,7 +1726,8 @@ void airTagLoop() {
     teardown();
     return;
   }
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+  // Remapped layout: LEFT exits now (was SELECT).
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
     teardown();
     feature_exit_requested = true;
     return;
@@ -1807,11 +1834,14 @@ static void updateNavLabels() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  setTouchNavLabels(s_scanning ? "Stop" : "Start",
-                    "Clear",
-                    "Exit",
+  // Remapped layout: LEFT=Exit (was Start/Stop), SELECT=Start/Stop (the most
+  // important action, was Exit). Next moves to DOWN (was RIGHT; Prev/Next
+  // always sit on UP/DOWN), Prev stays UP, Clear moves to RIGHT (was DOWN).
+  setTouchNavLabels("Exit",
+                    "Next",
+                    s_scanning ? "Stop" : "Start",
                     "Prev",
-                    "Next");
+                    "Clear");
   redrawTouchButtonBar();
 }
 
@@ -2130,14 +2160,17 @@ static void clampSelection() {
 static void handleButtons() {
   const unsigned long now = millis();
   if (now - s_lastBtnMs < BTN_DEBOUNCE_MS) {
-    (void)isButtonPressedEdge(BTN_LEFT);
+    (void)isButtonPressedEdge(BTN_SELECT);
     (void)isButtonPressedEdge(BTN_RIGHT);
     (void)isButtonPressedEdge(BTN_UP);
     (void)isButtonPressedEdge(BTN_DOWN);
     return;
   }
 
-  if (isButtonPressedEdge(BTN_LEFT)) {
+  // Remapped layout: SELECT is now Start/Stop (the most important action,
+  // was LEFT). LEFT is the universal Exit, handled as a level check in
+  // airTagSnifferLoop().
+  if (isButtonPressedEdge(BTN_SELECT)) {
     if (s_scanning) {
       stopScan();
     } else {
@@ -2149,7 +2182,9 @@ static void handleButtons() {
     return;
   }
 
-  if (isButtonPressedEdge(BTN_DOWN)) {
+  // Remapped layout: Prev/Next always sit on UP/DOWN -- UP stays Prev, Next
+  // moves to DOWN (was RIGHT), Clear moves to RIGHT (was DOWN).
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     clearHits();
     updateHeader(true);
     redrawList();
@@ -2176,7 +2211,7 @@ static void handleButtons() {
     return;
   }
 
-  if (isButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_DOWN)) {
     if (s_hitCount <= 0) {
       return;
     }
@@ -2280,7 +2315,8 @@ void airTagSnifferLoop() {
     teardown();
     return;
   }
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+  // Remapped layout: LEFT exits now (was SELECT).
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
     teardown();
     feature_exit_requested = true;
     return;
@@ -2433,11 +2469,14 @@ static void updateNavLabels() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  setTouchNavLabels(s_scanning ? "Stop" : "Start",
-                    "Clear",
-                    "Exit",
+  // Remapped layout: LEFT=Exit (was Start/Stop), SELECT=Start/Stop (the most
+  // important action, was Exit). Next moves to DOWN (was RIGHT; Prev/Next
+  // always sit on UP/DOWN), Prev stays UP, Clear moves to RIGHT (was DOWN).
+  setTouchNavLabels("Exit",
+                    "Next",
+                    s_scanning ? "Stop" : "Start",
                     "Prev",
-                    "Next");
+                    "Clear");
   redrawTouchButtonBar();
 }
 
@@ -2887,14 +2926,17 @@ static void clampSelection() {
 static void handleButtons() {
   const unsigned long now = millis();
   if (now - s_lastBtnMs < BTN_DEBOUNCE_MS) {
-    (void)isButtonPressedEdge(BTN_LEFT);
+    (void)isButtonPressedEdge(BTN_SELECT);
     (void)isButtonPressedEdge(BTN_RIGHT);
     (void)isButtonPressedEdge(BTN_UP);
     (void)isButtonPressedEdge(BTN_DOWN);
     return;
   }
 
-  if (isButtonPressedEdge(BTN_LEFT)) {
+  // Remapped layout: SELECT is now Start/Stop (the most important action,
+  // was LEFT). LEFT is the universal Exit, handled as a level check in
+  // bleSkimmerLoop().
+  if (isButtonPressedEdge(BTN_SELECT)) {
     if (s_scanning) {
       stopScan();
     } else {
@@ -2910,7 +2952,9 @@ static void handleButtons() {
     return;
   }
 
-  if (isButtonPressedEdge(BTN_DOWN)) {
+  // Remapped layout: Prev/Next always sit on UP/DOWN -- UP stays Prev, Next
+  // moves to DOWN (was RIGHT), Clear moves to RIGHT (was DOWN).
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     clearHits();
     updateHeader(true);
     redrawList();
@@ -2939,7 +2983,7 @@ static void handleButtons() {
     return;
   }
 
-  if (isButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_DOWN)) {
     if (s_hitCount <= 0) {
       return;
     }
@@ -3044,7 +3088,8 @@ void bleSkimmerLoop() {
     teardown();
     return;
   }
-  if (feature_active && (isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+  // Remapped layout: LEFT exits now (was SELECT).
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
     teardown();
     feature_exit_requested = true;
     return;
@@ -3149,9 +3194,6 @@ int Index = 0;
 volatile bool modeChangeRequested = false;
 volatile bool jammerToggleRequested = false;
 
-unsigned long lastButtonPressTime = 0;
-const unsigned long debounceDelay = 500;
-
 static constexpr int JAMMER_LOG_TOP = 48;
 
 static int jammerVisibleLines() {
@@ -3204,21 +3246,21 @@ void Print(String text, uint16_t color, bool extraSpace = false) {
 }
 
 void checkButtons() {
-  unsigned long currentTime = millis();
-
-  if (isButtonPressed(BTN_UP) && currentTime - lastButtonPressTime > debounceDelay) {
+  // Remapped layout: SELECT toggles the jammer on/off (was UP -- this is the
+  // screen's most important action), RIGHT changes mode (was LEFT/RIGHT
+  // both; LEFT is now the universal Exit, handled in blejamLoop).
+  //
+  // Edge-detected through the centrally debounced isButtonPressedEdge()
+  // (~25ms lockout, independent per button) instead of a level check gated
+  // by one shared 500ms timer -- that old lockout was long enough, and
+  // shared between both buttons, to drop a legitimate quick second press
+  // (e.g. mashing Toggle, or Toggle immediately followed by Mode).
+  if (isButtonPressedEdge(BTN_SELECT)) {
     jammerToggleRequested = true;
-    lastButtonPressTime = currentTime;
   }
 
-  if (isButtonPressed(BTN_RIGHT) && currentTime - lastButtonPressTime > debounceDelay) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     modeChangeRequested = true;
-    lastButtonPressTime = currentTime;
-  }
-
-  if (isButtonPressed(BTN_LEFT) && currentTime - lastButtonPressTime > debounceDelay) {
-    modeChangeRequested = true;
-    lastButtonPressTime = currentTime;
   }
 }
 
@@ -3280,35 +3322,21 @@ void updateTFT() {
 
   tft.setTextSize(1);
 
-  struct ButtonGuide {
-    const char* label;
-    const unsigned char* icon;
-  };
+  // Remapped layout: SELECT toggles on/off (was UP; no SELECT icon bitmap
+  // exists in this firmware, so its state is shown as plain status text --
+  // the touch nav bar's center "Toggle" label already names the button).
+  // RIGHT changes mode (was LEFT/RIGHT both). LEFT is the universal Exit and
+  // needs no guide slot here.
+  tft.setTextColor(jammerActive ? UI_OK : UI_TEXT, DARK_GRAY);
+  tft.setCursor(20, 23);
+  tft.print(jammerActive ? "[ON]" : "[OFF]");
 
-  ButtonGuide buttons[] = {
-    {jammerActive ? "[ON]" : "[OFF]", bitmap_icon_UP},
-    {"MODE-", bitmap_icon_LEFT},
-    {"MODE+", bitmap_icon_RIGHT}
-  };
+  tft.drawFastVLine(152, 22, 12, LIGHT_GRAY);
 
-  int xPos = 20;
-  int yPosIcon = 19;
-  int spacing = 75;
-
-  for (int i = 0; i < 3; i++) {
-    tft.drawBitmap(xPos, yPosIcon, buttons[i].icon, 16, 16, UI_ICON);
-
-    tft.setTextColor(UI_TEXT, DARK_GRAY);
-    tft.setCursor(xPos + 18, yPosIcon + 4);
-    tft.print(buttons[i].label);
-
-    if (i < 2) {
-      int sepX = xPos + spacing - 8;
-      tft.drawFastVLine(sepX, 22, 12, LIGHT_GRAY);
-    }
-
-    xPos += spacing;
-  }
+  tft.drawBitmap(160, 19, bitmap_icon_RIGHT, 16, 16, UI_ICON);
+  tft.setTextColor(UI_TEXT, DARK_GRAY);
+  tft.setCursor(178, 23);
+  tft.print("MODE");
 
   tft.drawFastHLine(0, 19, 240, UI_LINE);
   tft.drawFastHLine(0, 35, 240, UI_LINE);
@@ -3368,7 +3396,9 @@ void blejamSetup() {
 
 void blejamLoop() {
 
-  if (feature_active && isButtonPressed(BTN_SELECT)) {
+  // Remapped layout: physical LEFT exits now (was SELECT, moved to the
+  // jammer toggle -- see checkButtons()).
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
     feature_exit_requested = true;
     return;
   }
@@ -3452,10 +3482,14 @@ static void bleScanUpdateNavLabels() {
   if (!featureHasTouchNavBar()) {
     return;
   }
+  // Remapped layout: LEFT=Back (closes the detail screen, or exits the
+  // feature from the list -- see handleButtons()), SELECT=View (the most
+  // important action, since it opens the detail screen; was Exit), RIGHT=Scan
+  // (was toggle View). Up/Down remain Prev/Next.
   if (isDetailView) {
-    setTouchNavLabels("Scan", "Next", "Exit", "Prev", "Back");
+    setTouchNavLabels("Back", nullptr, nullptr, nullptr, "Scan");
   } else {
-    setTouchNavLabels("Scan", "Next", "Exit", "Prev", "View");
+    setTouchNavLabels("Back", "Next", "View", "Prev", "Scan");
   }
   redrawTouchButtonBar();
 }
@@ -3603,57 +3637,64 @@ void handleButtons() {
   int oldPage = current_page;
 
   if (isButtonPressed(BTN_UP)) {
-    if (currentIndex > 0) {
+    if (!isDetailView && currentIndex > 0) {
       currentIndex--;
       delay(200);
-      if (!isDetailView) {
-        current_page = currentIndex / max(1, bleDevicesPerPage());
-        listStartIndex = current_page * bleDevicesPerPage();
-        fullScreenUpdate = (current_page != oldPage);
-      } else {
-        fullScreenUpdate = true;
-      }
+      current_page = currentIndex / max(1, bleDevicesPerPage());
+      listStartIndex = current_page * bleDevicesPerPage();
+      fullScreenUpdate = (current_page != oldPage);
       screenNeedsUpdate = true;
     }
     lastButtonPress = currentMillis;
   }
 
   if (isButtonPressed(BTN_DOWN)) {
-    if (currentIndex < bleResults.getCount() - 1) {
+    if (!isDetailView && currentIndex < bleResults.getCount() - 1) {
       currentIndex++;
       delay(200);
-      if (!isDetailView) {
-        current_page = currentIndex / max(1, bleDevicesPerPage());
-        listStartIndex = current_page * bleDevicesPerPage();
-        fullScreenUpdate = (current_page != oldPage);
-      } else {
-        fullScreenUpdate = true;
-      }
+      current_page = currentIndex / max(1, bleDevicesPerPage());
+      listStartIndex = current_page * bleDevicesPerPage();
+      fullScreenUpdate = (current_page != oldPage);
       screenNeedsUpdate = true;
     }
     lastButtonPress = currentMillis;
   }
 
+  // Remapped layout: RIGHT=Scan (was toggle View), SELECT=View the selected
+  // device (was Exit -- the feature's most important action, since it opens
+  // the detail screen), LEFT=Back from detail / Exit the feature (was
+  // Scan/toggle View).
   if (isButtonPressed(BTN_RIGHT)) {
     delay(200);
     if (!isScanning) {
-      isDetailView = !isDetailView;
+      startBLEScan();
       screenNeedsUpdate = true;
       fullScreenUpdate = true;
     }
     lastButtonPress = currentMillis;
   }
 
-  if (isButtonPressed(BTN_LEFT)) {
-    delay(200);
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    // Edge, not level: LEFT's meaning changes depending on state (close
+    // detail vs. exit the feature), so a held press must not re-fire it a
+    // second time with the new meaning.
     if (isDetailView) {
       isDetailView = false;
       fullScreenUpdate = true;
-    } else if (!isScanning) {
-      startBLEScan();
-      fullScreenUpdate = true;
+      screenNeedsUpdate = true;
+    } else {
+      feature_exit_requested = true;
     }
-    screenNeedsUpdate = true;
+    lastButtonPress = currentMillis;
+  }
+
+  if (isButtonPressed(BTN_SELECT)) {
+    delay(200);
+    if (!isDetailView && !isScanning) {
+      isDetailView = true;
+      fullScreenUpdate = true;
+      screenNeedsUpdate = true;
+    }
     lastButtonPress = currentMillis;
   }
 }
@@ -3974,11 +4015,9 @@ void bleScanSetup() {
 
 void bleScanLoop() {
 
-  if (feature_active && isButtonPressed(BTN_SELECT)) {
-    feature_exit_requested = true;
-    return;
-  }
-
+  // Exit is now handled inside handleButtons() (physical LEFT, state-aware:
+  // closes the detail view first, then exits the feature) -- no separate
+  // top-level SELECT check anymore.
   tft.drawFastHLine(0, 19, 240, UI_LINE);
   handleButtons();
 
@@ -4090,8 +4129,10 @@ String Buffer[MAX_LINES];
 uint16_t Buffercolor[MAX_LINES];
 int Index = 0;
 
-bool isSelectButtonPressed() {
-  return isButtonPressed(BTN_SELECT);
+// Remapped layout: LEFT is the universal Exit now (was SELECT); renamed
+// from isSelectButtonPressed() to match.
+bool isExitButtonPressed() {
+  return isButtonPressed(BTN_LEFT);
 }
 
 byte getRegister(byte r) {
@@ -4218,22 +4259,28 @@ void scannerHandleNavButtons() {
     return;
   }
 
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
-    calibrateBackgroundNoise();
-    s_scannerLastBtnMs = millis();
-    scannerWaitNavRelease(BTN_LEFT);
-    return;
-  }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+  // Remapped layout: SELECT=Scan (the most important action -- refreshes
+  // the reading, was Exit), RIGHT=Calibrate (secondary, was LEFT). LEFT is
+  // the universal Exit, handled in scannerPollNavButtons(). Also switched
+  // from isTouchNavButtonPressedEdge (touch-tap only) to isButtonPressedEdge
+  // so the physical buttons actually trigger these actions too.
+  if (isButtonPressedEdge(BTN_SELECT)) {
     scan();
     s_scannerLastBtnMs = millis();
-    scannerWaitNavRelease(BTN_DOWN);
+    scannerWaitNavRelease(BTN_SELECT);
+    return;
+  }
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    calibrateBackgroundNoise();
+    s_scannerLastBtnMs = millis();
+    scannerWaitNavRelease(BTN_RIGHT);
   }
 }
 
 static void scannerPollNavButtons() {
   maintainTouchNavBar();
-  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+  // Remapped layout: LEFT exits now (was SELECT via featureExitButtonPressed()).
+  if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
     feature_exit_requested = true;
     scanning = false;
     return;
@@ -4410,13 +4457,11 @@ void scanChannels() {
   for (int j = 0; j < (int)SCAN_SWEEPS && scanning; j++) {
     for (int i = 0; i < CHANNELS && scanning; i++) {
 
-      if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
+      // Remapped layout: LEFT exits now (was SELECT via isSelectButtonPressed()/
+      // featureExitButtonPressed() -- merged into one check).
+      if ((i % BUTTON_POLL_STRIDE) == 0 && (feature_exit_requested || isExitButtonPressed())) {
         scanning = false;
         Print("Scan interrupted by user", UI_WARN, true);
-        return;
-      }
-      if (feature_exit_requested || featureExitButtonPressed()) {
-        scanning = false;
         return;
       }
 
@@ -4432,7 +4477,7 @@ void scanChannels() {
         scannerPollNavButtons();
         lastUI = now;
         delay(0);
-        if (feature_exit_requested || featureExitButtonPressed()) {
+        if (feature_exit_requested || isExitButtonPressed()) {
           scanning = false;
           return;
         }
@@ -4450,7 +4495,8 @@ void outputChannels() {
   }
   static uint32_t lastUI = 0;
   for (int i = 0; i < CHANNELS && scanning; i++) {
-    if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
+    // Remapped layout: LEFT exits now (was SELECT via isSelectButtonPressed()).
+    if ((i % BUTTON_POLL_STRIDE) == 0 && (feature_exit_requested || isExitButtonPressed())) {
       scanning = false;
       Print("Output interrupted by user", UI_WARN, true);
       return;
@@ -4884,12 +4930,11 @@ void display() {
   static uint32_t lastNavPoll = 0;
   for (int pass = 0; pass < (int)DISPLAY_SWEEPS && scanning; ++pass) {
     for (int i = 0; i < N && scanning; ++i) {
-      if ((i % BUTTON_POLL_STRIDE) == 0 && isSelectButtonPressed()) {
+      // Remapped layout: LEFT exits now (was SELECT via isSelectButtonPressed()/
+      // featureExitButtonPressed() -- merged into one check).
+      if ((i % BUTTON_POLL_STRIDE) == 0 && (feature_exit_requested || isExitButtonPressed())) {
         scanning = false;
         Print("Display interrupted by user", UI_WARN, true);
-        return;
-      }
-      if (feature_exit_requested || featureExitButtonPressed()) {
         return;
       }
 
@@ -4964,7 +5009,8 @@ void scannerLoop() {
   scanning = true;
   while (scanning) {
 
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+    // Remapped layout: LEFT exits now (was SELECT via featureExitButtonPressed()).
+    if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
       feature_exit_requested = true;
       scanning = false;
       break;
@@ -5101,17 +5147,21 @@ void prokillHandleNavButtons() {
     return;
   }
 
-  if (isButtonPressedEdge(BTN_UP)) {
+  // Remapped layout: SELECT toggles on/off (was UP -- the most important
+  // action), UP=Mode- (was LEFT), DOWN=Mode+ (was RIGHT; Prev/Next-style
+  // pairs always sit on UP/DOWN). LEFT is the universal Exit, handled in
+  // prokillLoop().
+  if (isButtonPressedEdge(BTN_SELECT)) {
     jammerToggleRequested = true;
-    bleWaitButtonRelease(BTN_UP);
+    bleWaitButtonRelease(BTN_SELECT);
   }
-  if (isButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_DOWN)) {
     modeChangeRequested = true;
-    bleWaitButtonRelease(BTN_RIGHT);
+    bleWaitButtonRelease(BTN_DOWN);
   }
-  if (isButtonPressedEdge(BTN_LEFT)) {
+  if (isButtonPressedEdge(BTN_UP)) {
     modeChangeRequested1 = true;
-    bleWaitButtonRelease(BTN_LEFT);
+    bleWaitButtonRelease(BTN_UP);
   }
 }
 
@@ -5164,35 +5214,25 @@ void updateTFT() {
 
   tft.setTextSize(1);
 
-  struct ButtonGuide {
-    const char* label;
-    const unsigned char* icon;
-  };
+  // Remapped layout: LEFT=Exit, SELECT=Toggle on/off (was UP; no SELECT icon
+  // bitmap exists in this firmware, so its state is shown as plain status
+  // text -- the touch nav bar's center "Toggle" label already names the
+  // button), UP=Mode- (was LEFT), DOWN=Mode+ (was RIGHT).
+  tft.setTextColor(jammerActive ? UI_OK : UI_TEXT, DARK_GRAY);
+  tft.setCursor(20, 23);
+  tft.print(jammerActive ? "[ON]" : "[OFF]");
 
-  ButtonGuide buttons[] = {
-    {jammerActive ? "[ON]" : "[OFF]", bitmap_icon_UP},
-    {"MODE-", bitmap_icon_LEFT},
-    {"MODE+", bitmap_icon_RIGHT}
-  };
+  tft.drawFastVLine(102, 22, 12, LIGHT_GRAY);
+  tft.drawBitmap(110, 19, bitmap_icon_UP, 16, 16, UI_ICON);
+  tft.setTextColor(UI_TEXT, DARK_GRAY);
+  tft.setCursor(128, 23);
+  tft.print("MODE-");
 
-  int xPos = 20;
-  int yPosIcon = 19;
-  int spacing = 75;
-
-  for (int i = 0; i < 3; i++) {
-    tft.drawBitmap(xPos, yPosIcon, buttons[i].icon, 16, 16, UI_ICON);
-
-    tft.setTextColor(UI_TEXT, DARK_GRAY);
-    tft.setCursor(xPos + 18, yPosIcon + 4);
-    tft.print(buttons[i].label);
-
-    if (i < 2) {
-      int sepX = xPos + spacing - 8;
-      tft.drawFastVLine(sepX, 22, 12, LIGHT_GRAY);
-    }
-
-    xPos += spacing;
-  }
+  tft.drawFastVLine(178, 22, 12, LIGHT_GRAY);
+  tft.drawBitmap(186, 19, bitmap_icon_DOWN, 16, 16, UI_ICON);
+  tft.setTextColor(UI_TEXT, DARK_GRAY);
+  tft.setCursor(204, 23);
+  tft.print("+");
 
   tft.drawFastHLine(0, 19, 240, UI_LINE);
   tft.drawFastHLine(0, 35, 240, UI_LINE);
@@ -5251,7 +5291,7 @@ void checkModeChange() {
 
 void prokillSetup() {
   setTouchButtonInputEnabled(true);
-  bleSetJammerNavLabels();
+  bleSetProkillNavLabels();
   bleClearBody(TFT_BLACK);
   Index = 0;
 
@@ -5277,7 +5317,8 @@ void prokillSetup() {
 
 void prokillLoop() {
 
-  if (feature_active && (feature_exit_requested || isButtonPressed(BTN_SELECT) || featureExitButtonPressed())) {
+  // Remapped layout: LEFT exits now (was SELECT).
+  if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
     feature_exit_requested = true;
     return;
   }
@@ -6067,26 +6108,32 @@ void esbHandleNavButtons() {
     return;
   }
 
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
-    esbChannelDown();
+  // Remapped layout: SELECT=Hop (the most important action, was on UP with
+  // Exit on center), UP=Ch- (was LEFT), DOWN=Ch+ (was RIGHT; Prev/Next-style
+  // pairs always sit on UP/DOWN), RIGHT=Log (secondary, was DOWN). LEFT is
+  // the universal Exit, handled in esbSnifferLoop(). Also switched from
+  // isTouchNavButtonPressedEdge (touch-tap only) to isButtonPressedEdge so
+  // the physical buttons actually trigger these actions too.
+  if (isButtonPressedEdge(BTN_SELECT)) {
+    esbToggleHop();
     s_esbLastBtnMs = millis();
-    esbWaitNavRelease(BTN_LEFT);
+    esbWaitNavRelease(BTN_SELECT);
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
-    esbChannelUp();
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    esbToggleLog();
     s_esbLastBtnMs = millis();
     esbWaitNavRelease(BTN_RIGHT);
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
-    esbToggleHop();
+  if (isButtonPressedEdge(BTN_UP)) {
+    esbChannelDown();
     s_esbLastBtnMs = millis();
     esbWaitNavRelease(BTN_UP);
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
-    esbToggleLog();
+  if (isButtonPressedEdge(BTN_DOWN)) {
+    esbChannelUp();
     s_esbLastBtnMs = millis();
     esbWaitNavRelease(BTN_DOWN);
   }
@@ -6248,7 +6295,8 @@ void esbSnifferSetup() {
 void esbSnifferLoop() {
   sniffing = true;
   while (sniffing) {
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+    // Remapped layout: LEFT exits now (was SELECT).
+    if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
       feature_exit_requested = true;
       sniffing = false;
       break;
@@ -6832,7 +6880,8 @@ static void rpPlaySelected() {
 
   rpConfigureTx(cap.channel);
   for (uint8_t n = 0; n < kRpReplayBursts; n++) {
-    if (feature_exit_requested || featureExitButtonPressed()) break;
+    // Remapped layout: LEFT exits now (was SELECT).
+    if (feature_exit_requested || isButtonPressed(BTN_LEFT)) break;
     rpWritePayload(cap.data, cap.len);
     delay(kRpReplayGapMs);
     // Nearby channels help hopping receivers
@@ -6913,34 +6962,40 @@ void rpHandleNavButtons() {
   if (!featureHasTouchNavBar()) return;
   if (millis() - s_rpLastBtnMs < 80) return;
 
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+  // Remapped layout: SELECT=Play (the most important action, was UP), UP=Prev
+  // (was LEFT), DOWN=Next (was RIGHT; Prev/Next always sit on UP/DOWN),
+  // RIGHT=Arm/long-press Clear (secondary, was DOWN). LEFT is the universal
+  // Exit, handled in esbReplayLoop(). Also switched from
+  // isTouchNavButtonPressedEdge (touch-tap only) to isButtonPressedEdge so
+  // the physical buttons actually trigger these actions too.
+  if (isButtonPressedEdge(BTN_UP)) {
     rpPrev();
     s_rpLastBtnMs = millis();
-    rpWaitNavRelease(BTN_LEFT);
+    rpWaitNavRelease(BTN_UP);
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_DOWN)) {
     rpNext();
     s_rpLastBtnMs = millis();
-    rpWaitNavRelease(BTN_RIGHT);
+    rpWaitNavRelease(BTN_DOWN);
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     const uint32_t t0 = millis();
-    while (isTouchNavButtonPressed(BTN_DOWN) && millis() - t0 < 700) delay(10);
+    while (isButtonPressed(BTN_RIGHT) && millis() - t0 < 700) delay(10);
     if (millis() - t0 >= 700) {
       rpClearCaptures();
     } else {
       rpToggleArm();
     }
     s_rpLastBtnMs = millis();
-    rpWaitNavRelease(BTN_DOWN);
+    rpWaitNavRelease(BTN_RIGHT);
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+  if (isButtonPressedEdge(BTN_SELECT)) {
     rpPlaySelected();
     s_rpLastBtnMs = millis();
-    rpWaitNavRelease(BTN_UP);
+    rpWaitNavRelease(BTN_SELECT);
   }
 }
 
@@ -7093,7 +7148,8 @@ void esbReplaySetup() {
 void esbReplayLoop() {
   s_active = true;
   while (s_active) {
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+    // Remapped layout: LEFT exits now (was SELECT).
+    if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
       feature_exit_requested = true;
       s_active = false;
       break;
@@ -7834,16 +7890,21 @@ void mouseJackHandleNavButtons() {
   if (now - s_mjLastBtnMs < kMjNavDebounceMs) {
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+  // Remapped layout: SELECT=Pause (the most important action, was DOWN),
+  // RIGHT=Clear (secondary, was LEFT). LEFT is the universal Exit, handled
+  // in mouseJackLoop(). Also switched from isTouchNavButtonPressedEdge
+  // (touch-tap only) to isButtonPressedEdge so the physical buttons
+  // actually trigger these actions too.
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     mjClearDevices();
     s_mjLastBtnMs = millis();
-    mjWaitNavRelease(BTN_LEFT);
+    mjWaitNavRelease(BTN_RIGHT);
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+  if (isButtonPressedEdge(BTN_SELECT)) {
     mjTogglePause();
     s_mjLastBtnMs = millis();
-    mjWaitNavRelease(BTN_DOWN);
+    mjWaitNavRelease(BTN_SELECT);
   }
 }
 
@@ -7978,7 +8039,8 @@ void mouseJackSetup() {
 void mouseJackLoop() {
   scanning = true;
   while (scanning) {
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+    // Remapped layout: LEFT exits now (was SELECT).
+    if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
       feature_exit_requested = true;
       scanning = false;
       break;
@@ -8597,7 +8659,8 @@ static void injTransmitString(const char* text) {
   const int chTry[3] = {t.channel, (t.channel + 1) % 84, (t.channel + 83) % 84};
 
   for (size_t ci = 0; text[ci]; ci++) {
-    if (feature_exit_requested || featureExitButtonPressed()) break;
+    // Remapped layout: LEFT exits now (was SELECT).
+    if (feature_exit_requested || isButtonPressed(BTN_LEFT)) break;
 
     uint8_t mod = 0, key = 0;
     if (!injCharToHid(text[ci], mod, key)) continue;
@@ -8666,29 +8729,35 @@ void injHandleNavButtons() {
   if (!featureHasTouchNavBar()) return;
   if (millis() - s_injLastBtnMs < 80) return;
 
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+  // Remapped layout: SELECT=Fire (the most important action, was UP), UP=Prev
+  // target (was LEFT), DOWN=Next target (was RIGHT; Prev/Next always sit on
+  // UP/DOWN), RIGHT=Pay/Stop scan (secondary, was DOWN). LEFT is the
+  // universal Exit, handled in mouseJackInjectLoop(). Also switched from
+  // isTouchNavButtonPressedEdge (touch-tap only) to isButtonPressedEdge so
+  // the physical buttons actually trigger these actions too.
+  if (isButtonPressedEdge(BTN_UP)) {
     injPrevTarget();
     s_injLastBtnMs = millis();
-    injWaitNavRelease(BTN_LEFT);
+    injWaitNavRelease(BTN_UP);
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_DOWN)) {
     injNextTarget();
     s_injLastBtnMs = millis();
-    injWaitNavRelease(BTN_RIGHT);
+    injWaitNavRelease(BTN_DOWN);
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     if (s_scanning) {
       injStopScan();
     } else {
       injNextPayload();
     }
     s_injLastBtnMs = millis();
-    injWaitNavRelease(BTN_DOWN);
+    injWaitNavRelease(BTN_RIGHT);
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+  if (isButtonPressedEdge(BTN_SELECT)) {
     if (s_targetCount == 0 || s_scanning) {
       if (s_scanning) injStopScan();
       else injStartScan();
@@ -8696,7 +8765,7 @@ void injHandleNavButtons() {
       injToggleScanOrFire();
     }
     s_injLastBtnMs = millis();
-    injWaitNavRelease(BTN_UP);
+    injWaitNavRelease(BTN_SELECT);
   }
 }
 
@@ -8844,7 +8913,8 @@ void mouseJackInjectSetup() {
 void mouseJackInjectLoop() {
   s_active = true;
   while (s_active) {
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+    // Remapped layout: LEFT exits now (was SELECT).
+    if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
       feature_exit_requested = true;
       s_active = false;
       break;
@@ -9380,7 +9450,8 @@ public:
   }
 
   void loop() {
-    if (feature_exit_requested || featureExitButtonPressed()) {
+    // Remapped layout: LEFT exits now (was SELECT via featureExitButtonPressed()).
+    if (feature_exit_requested || isButtonPressed(BTN_LEFT)) {
       feature_exit_requested = true;
       return;
     }
@@ -9389,7 +9460,7 @@ public:
     tft.drawFastHLine(0, 19, 240, UI_LINE);
 
     runUI();
-    if (feature_exit_requested || featureExitButtonPressed()) {
+    if (feature_exit_requested || isButtonPressed(BTN_LEFT)) {
       feature_exit_requested = true;
       return;
     }
@@ -9494,7 +9565,8 @@ public:
     newDevicesThisScan = 0;
     constexpr int kScanChunkSec = 1;
     for (int elapsed = 0; elapsed < Config::bleScanDuration; elapsed += kScanChunkSec) {
-      if (feature_exit_requested || featureExitButtonPressed()) {
+      // Remapped layout: LEFT exits now (was SELECT via featureExitButtonPressed()).
+      if (feature_exit_requested || isButtonPressed(BTN_LEFT)) {
         feature_exit_requested = true;
         if (pBLEScan) {
           pBLEScan->stop();
@@ -9551,7 +9623,9 @@ void blesnifferSetup() {
 
 void blesnifferLoop() {
 
-  if (feature_active && featureExitButtonPressed()) {
+  // Remapped layout: LEFT exits now (was SELECT via featureExitButtonPressed()).
+  // This feature has no other physical action -- Clear/Filter stay touch-icon-only.
+  if (feature_active && isButtonPressed(BTN_LEFT)) {
     feature_exit_requested = true;
     return;
   }

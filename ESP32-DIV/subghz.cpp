@@ -414,7 +414,8 @@ static void subghzRedrawNavChrome() {
 static bool subghzWaitWithNav(uint32_t ms) {
   const uint32_t until = millis() + ms;
   while ((int32_t)(millis() - until) < 0) {
-    if (feature_exit_requested || featureExitButtonPressed()) {
+    // Remapped layout: LEFT exits now (was SELECT).
+    if (feature_exit_requested || isButtonPressed(BTN_LEFT)) {
       return false;
     }
     if (featureHasTouchNavBar()) {
@@ -426,19 +427,34 @@ static bool subghzWaitWithNav(uint32_t ms) {
 }
 
 static void subghzSetReplayNavLabels() {
-  setTouchNavLabels("Freq-", "Save", "Exit", "Send", "Freq+");
+  // Remapped layout: LEFT=Exit (was Freq-), SELECT=Send (the most important
+  // action, was on UP with Exit on center), UP=Freq- (was LEFT), DOWN=Freq+
+  // (was RIGHT; Freq-/Freq+ is a Prev/Next-style pair, always on UP/DOWN),
+  // RIGHT=Save (secondary, was DOWN).
+  setTouchNavLabels("Exit", "Freq+", "Send", "Freq-", "Save");
 }
 
 static void subghzSetJammerNavLabels() {
-  setTouchNavLabels("Freq-", "Auto", "Exit", "Toggle", "Freq+");
+  // Remapped layout: LEFT=Exit (was Freq-), SELECT=Toggle (the most
+  // important action, was on UP with Exit on center), UP=Freq- (was LEFT),
+  // DOWN=Freq+ (was RIGHT; Freq-/Freq+ always on UP/DOWN), RIGHT=Auto
+  // (secondary, was DOWN).
+  setTouchNavLabels("Exit", "Freq+", "Toggle", "Freq-", "Auto");
 }
 
 static void subghzSetProfileNavLabels() {
-  setTouchNavLabels("Delete", "Next", "Exit", "Prev", "TX");
+  // Remapped layout: LEFT=Exit (was Delete), SELECT=TX (the most important
+  // action, was RIGHT; Exit was on center), RIGHT=Delete (secondary, was
+  // LEFT). Prev/Next were already correctly on UP/DOWN.
+  setTouchNavLabels("Exit", "Next", "TX", "Prev", "Delete");
 }
 
 static void subghzSetBruteNavLabels() {
-  setTouchNavLabels("Prev", "Sel", "Exit", "Go", "Next");
+  // Remapped layout: LEFT=Exit (was Prev), SELECT=Go (the most important
+  // action, was on UP with Exit on center), UP=Prev (was LEFT), DOWN=Next
+  // (was RIGHT; Prev/Next always on UP/DOWN), RIGHT=Sel (secondary, was
+  // DOWN).
+  setTouchNavLabels("Exit", "Next", "Go", "Prev", "Sel");
 }
 
 /* ── Is there actually a CC1101 on the bus? ────────────────────────────────
@@ -937,25 +953,31 @@ void replayHandleNavButtons() {
     return;
   }
 
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+  // Remapped layout: SELECT=Send (the most important action, was UP), UP=
+  // Freq- (was LEFT), DOWN=Freq+ (was RIGHT; Freq-/Freq+ always sit on
+  // UP/DOWN), RIGHT=Save (secondary, was DOWN). LEFT is the universal Exit,
+  // handled in ReplayAttackLoop(). Also switched from
+  // isTouchNavButtonPressedEdge (touch-tap only) to isButtonPressedEdge so
+  // the physical buttons actually trigger these actions too.
+  if (isButtonPressedEdge(BTN_UP)) {
     replayFreqPrev();
-    subghzWaitNavRelease(BTN_LEFT);
+    subghzWaitNavRelease(BTN_UP);
   }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_DOWN)) {
     replayFreqNext();
-    subghzWaitNavRelease(BTN_RIGHT);
+    subghzWaitNavRelease(BTN_DOWN);
   }
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+  if (isButtonPressedEdge(BTN_SELECT)) {
     if (receivedValue != 0) {
       autoScanEnabled = false;
       replayClearScanLock();
       sendSignal();
     }
-    subghzWaitNavRelease(BTN_UP);
+    subghzWaitNavRelease(BTN_SELECT);
   }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     replayTrySave();
-    subghzWaitNavRelease(BTN_DOWN);
+    subghzWaitNavRelease(BTN_RIGHT);
   }
 }
 
@@ -1463,7 +1485,8 @@ void ReplayAttackSetup() {
 
 void ReplayAttackLoop() {
 
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+    // Remapped layout: LEFT exits now (was SELECT).
+    if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
         replayDisarmReceive();
         feature_exit_requested = true;
         return;
@@ -1478,16 +1501,11 @@ void ReplayAttackLoop() {
         replayDrawStatusSeparator();
       }
     }
+    // replayHandleNavButtons() now reads isButtonPressedEdge() (physical OR
+    // touch-nav, see its own comment), which made the raw
+    // isPhysicalButtonPressed() block that used to live here (and
+    // duplicated/conflicted with it) redundant -- removed.
     replayHandleNavButtons();
-
-    static unsigned long lastDebounceTime = 0;
-    const unsigned long debounceDelay = 200;
-
-    static bool prevLeft = false, prevRight = false, prevUp = false, prevDown = false;
-    const bool leftPressed  = isPhysicalButtonPressed(BTN_LEFT);
-    const bool rightPressed = isPhysicalButtonPressed(BTN_RIGHT);
-    const bool upPressed    = isPhysicalButtonPressed(BTN_UP);
-    const bool downPressed  = isPhysicalButtonPressed(BTN_DOWN);
 
     replayBeepPoll();
 
@@ -1550,30 +1568,6 @@ void ReplayAttackLoop() {
       updateDisplay();
       subghzRedrawNavChrome();
     }
-
-    if (rightPressed && !prevRight && millis() - lastDebounceTime > debounceDelay) {
-        replayFreqNext();
-        lastDebounceTime = millis();
-    }
-    if (leftPressed && !prevLeft && millis() - lastDebounceTime > debounceDelay) {
-        replayFreqPrev();
-        lastDebounceTime = millis();
-    }
-    if (upPressed && !prevUp && receivedValue != 0 && millis() - lastDebounceTime > debounceDelay) {
-        autoScanEnabled = false;
-        replayClearScanLock();
-        sendSignal();
-        lastDebounceTime = millis();
-    }
-    if (downPressed && !prevDown && millis() - lastDebounceTime > debounceDelay) {
-        replayTrySave();
-        lastDebounceTime = millis();
-    }
-
-    prevLeft = leftPressed;
-    prevRight = rightPressed;
-    prevUp = upPressed;
-    prevDown = downPressed;
 
     if (autoScanEnabled) {
       const uint32_t now = millis();
@@ -1862,29 +1856,34 @@ void profileHandleNavButtons() {
     return;
   }
 
-  if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+  // Remapped layout: LEFT=Exit (was Delete), SELECT=TX (the most important
+  // action, was RIGHT; Exit was on SELECT), RIGHT=Delete (secondary, was
+  // LEFT). Prev/Next were already correctly on UP/DOWN. Also switched from
+  // isTouchNavButtonPressedEdge (touch-tap only) to isButtonPressedEdge so
+  // the physical buttons actually trigger these actions too.
+  if (isButtonPressedEdge(BTN_LEFT)) {
     feature_exit_requested = true;
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+  if (isButtonPressedEdge(BTN_UP)) {
     profileSelectPrev();
     subghzWaitNavRelease(BTN_UP);
   }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
+  if (isButtonPressedEdge(BTN_DOWN)) {
     profileSelectNext();
     subghzWaitNavRelease(BTN_DOWN);
   }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
-    if (sdTotalProfiles > 0) {
-      transmitProfile(currentProfileIndex);
-    }
-    subghzWaitNavRelease(BTN_RIGHT);
-  }
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     if (sdTotalProfiles > 0) {
       deleteProfile(currentProfileIndex);
     }
-    subghzWaitNavRelease(BTN_LEFT);
+    subghzWaitNavRelease(BTN_RIGHT);
+  }
+  if (isButtonPressedEdge(BTN_SELECT)) {
+    if (sdTotalProfiles > 0) {
+      transmitProfile(currentProfileIndex);
+    }
+    subghzWaitNavRelease(BTN_SELECT);
   }
 }
 
@@ -2310,54 +2309,19 @@ void saveSetup() {
 
 void saveLoop() {
 
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+    // Remapped layout: LEFT exits now (was SELECT).
+    if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
         feature_exit_requested = true;
         return;
     }
 
     maintainTouchNavBar();
     runUI();
+    // profileHandleNavButtons() now reads isButtonPressedEdge() (physical OR
+    // touch-nav, see its own comment), which made the raw
+    // isPhysicalButtonPressed() block that used to live here (and
+    // duplicated/conflicted with it) redundant -- removed.
     profileHandleNavButtons();
-
-    static unsigned long lastDebounceTime = 0;
-    const unsigned long debounceDelay = 200;
-
-    static bool prevUp = false;
-    static bool prevDown = false;
-    static bool prevRight = false;
-    static bool prevLeft = false;
-    const bool prevPressed    = isPhysicalButtonPressed(BTN_UP);
-    const bool nextPressed    = isPhysicalButtonPressed(BTN_DOWN);
-    const bool txPressed      = isPhysicalButtonPressed(BTN_RIGHT);
-    const bool deletePressed = isPhysicalButtonPressed(BTN_LEFT);
-
-    if (sdTotalProfiles > 0) {
-
-        if (nextPressed && !prevDown && millis() - lastDebounceTime > debounceDelay) {
-            profileSelectNext();
-            lastDebounceTime = millis();
-        }
-
-        if (prevPressed && !prevUp && millis() - lastDebounceTime > debounceDelay) {
-            profileSelectPrev();
-            lastDebounceTime = millis();
-        }
-
-        if (txPressed && !prevRight && millis() - lastDebounceTime > debounceDelay) {
-            transmitProfile(currentProfileIndex);
-            lastDebounceTime = millis();
-        }
-
-        if (deletePressed && !prevLeft && millis() - lastDebounceTime > debounceDelay) {
-            deleteProfile(currentProfileIndex);
-            lastDebounceTime = millis();
-        }
-    }
-
-    prevUp = prevPressed;
-    prevDown = nextPressed;
-    prevRight = txPressed;
-    prevLeft = deletePressed;
 }
 
 }
@@ -2497,21 +2461,27 @@ void subjammerHandleNavButtons() {
     return;
   }
 
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+  // Remapped layout: SELECT=Toggle (the most important action, was UP),
+  // UP=Freq- (was LEFT), DOWN=Freq+ (was RIGHT; Freq-/Freq+ always sit on
+  // UP/DOWN), RIGHT=Auto (secondary, was DOWN). LEFT is the universal Exit.
+  // Also switched from isTouchNavButtonPressedEdge (touch-tap only) to
+  // isButtonPressedEdge so the physical buttons actually trigger these
+  // actions too.
+  if (isButtonPressedEdge(BTN_SELECT)) {
     subjammerToggleJam();
+    subghzWaitNavRelease(BTN_SELECT);
+  }
+  if (isButtonPressedEdge(BTN_UP)) {
+    subjammerFreqPrev();
     subghzWaitNavRelease(BTN_UP);
   }
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
-    subjammerFreqPrev();
-    subghzWaitNavRelease(BTN_LEFT);
-  }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_DOWN)) {
     subjammerFreqNext();
-    subghzWaitNavRelease(BTN_RIGHT);
-  }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
-    subjammerToggleAuto();
     subghzWaitNavRelease(BTN_DOWN);
+  }
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    subjammerToggleAuto();
+    subghzWaitNavRelease(BTN_RIGHT);
   }
 }
 
@@ -2827,7 +2797,8 @@ void subjammerSetup() {
 
 void subjammerLoop() {
 
-    if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+    // Remapped layout: LEFT exits now (was SELECT).
+    if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
         feature_exit_requested = true;
         return;
     }
@@ -3082,7 +3053,8 @@ static void bruteFinishTx() {
 }
 
 static bool bruteShouldAbort() {
-  if (feature_exit_requested || featureExitButtonPressed()) {
+  // Remapped layout: LEFT exits now (was SELECT).
+  if (feature_exit_requested || isButtonPressed(BTN_LEFT)) {
     feature_exit_requested = true;
     s_stopRequested = true;
     return true;
@@ -3524,21 +3496,27 @@ void bruteHandleNavButtons() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+  // Remapped layout: SELECT=Go/Stop (the most important action, was UP),
+  // UP=Prev value (was LEFT), DOWN=Next value (was RIGHT; Prev/Next always
+  // sit on UP/DOWN), RIGHT=Sel/cycle focus (secondary, was DOWN). LEFT is
+  // the universal Exit. Also switched from isTouchNavButtonPressedEdge
+  // (touch-tap only) to isButtonPressedEdge so the physical buttons
+  // actually trigger these actions too.
+  if (isButtonPressedEdge(BTN_UP)) {
     adjustFocused(-1);
-    subghzWaitNavRelease(BTN_LEFT);
+    subghzWaitNavRelease(BTN_UP);
   }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_DOWN)) {
     adjustFocused(+1);
-    subghzWaitNavRelease(BTN_RIGHT);
-  }
-  if (isTouchNavButtonPressedEdge(BTN_DOWN)) {
-    cycleFocus();
     subghzWaitNavRelease(BTN_DOWN);
   }
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    cycleFocus();
+    subghzWaitNavRelease(BTN_RIGHT);
+  }
+  if (isButtonPressedEdge(BTN_SELECT)) {
     startOrStop();
-    subghzWaitNavRelease(BTN_UP);
+    subghzWaitNavRelease(BTN_SELECT);
   }
 }
 
@@ -3705,7 +3683,8 @@ void subBruteSetup() {
 }
 
 void subBruteLoop() {
-  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+  // Remapped layout: LEFT exits now (was SELECT).
+  if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
     feature_exit_requested = true;
     s_stopRequested = true;
     return;
@@ -3779,7 +3758,7 @@ static uint32_t eventCount = 0;
 
 static bool logEnabled = false;
 static bool logMounted = false;
-static bool prevLeft = false, prevRight = false, prevUp = false, prevDown = false;
+static bool prevRight = false, prevUp = false, prevDown = false, prevSelect = false;
 
 static constexpr int kJdBarBottom = 36;
 static constexpr int kJdSectionGap = 6;
@@ -4252,17 +4231,21 @@ static bool edge(int pin, bool& prev) {
 }
 
 static void handleInput() {
-  const bool navFreqDown = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_LEFT);
-  const bool navFreqUp = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_RIGHT);
-  const bool navReset = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_UP);
-  const bool navLog = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_DOWN);
+  // Remapped layout: SELECT=Log (the most important action, was DOWN; Exit
+  // was on SELECT), UP=Freq- (was LEFT), DOWN=Freq+ (was RIGHT; Freq-/Freq+
+  // is a Prev/Next-style pair, always on UP/DOWN), RIGHT=Reset (secondary,
+  // was UP). LEFT is the universal Exit, handled in Loop().
+  const bool navFreqDown = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_UP);
+  const bool navFreqUp = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_DOWN);
+  const bool navReset = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_RIGHT);
+  const bool navLog = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_SELECT);
 
-  if (edge(BTN_LEFT, prevLeft) || navFreqDown) tuneTo(freqIdx + kFreqCount - 1);
-  if (edge(BTN_RIGHT, prevRight) || navFreqUp) tuneTo(freqIdx + 1);
-  if (edge(BTN_UP, prevUp) || navReset) {
+  if (edge(BTN_UP, prevUp) || navFreqDown) tuneTo(freqIdx + kFreqCount - 1);
+  if (edge(BTN_DOWN, prevDown) || navFreqUp) tuneTo(freqIdx + 1);
+  if (edge(BTN_RIGHT, prevRight) || navReset) {
     jdResetStats();
   }
-  if (edge(BTN_DOWN, prevDown) || navLog) {
+  if (edge(BTN_SELECT, prevSelect) || navLog) {
     logEnabled = !logEnabled;
     s_disp.logOn = !logEnabled;
   }
@@ -4275,7 +4258,11 @@ static void exitCleanup() {
 
 void Setup() {
   setTouchButtonInputEnabled(true);
-  setTouchNavLabels("Freq-", "Log", "Exit", "Reset", "Freq+");
+  // Remapped layout: LEFT=Exit (was Freq-), SELECT=Log (the most important
+  // action, was on DOWN with Exit on center), UP=Freq- (was LEFT), DOWN=
+  // Freq+ (was RIGHT; Freq-/Freq+ always on UP/DOWN), RIGHT=Reset
+  // (secondary, was UP).
+  setTouchNavLabels("Exit", "Freq+", "Log", "Freq-", "Reset");
 
   holdSdInactiveOnSharedSpi();
   reclaimSharedSpiBus();
@@ -4299,7 +4286,7 @@ void Setup() {
   jamActive = false;
   logMounted = false;
   for (uint8_t i = 0; i < JD_RING; i++) dutyRing[i] = 0;
-  prevLeft = prevRight = prevUp = prevDown = false;
+  prevRight = prevUp = prevDown = prevSelect = false;
   jdInvalidateAll();
 
 #if HAS_PCF8574_BUTTONS
@@ -4321,7 +4308,8 @@ void Setup() {
 }
 
 void Loop() {
-  if (feature_active && (feature_exit_requested || featureExitButtonPressed())) {
+  // Remapped layout: LEFT exits now (was SELECT).
+  if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
     exitCleanup();
     feature_exit_requested = true;
     return;

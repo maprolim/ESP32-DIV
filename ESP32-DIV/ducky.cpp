@@ -141,11 +141,15 @@ static void duckyUpdateNavLabels() {
     return;
   }
   if (page == Page::List) {
-    setTouchNavLabels("Exit", "Reload", "Open", "Prev", "Next");
+    // Prev/Next always sit on UP/DOWN: Next moves to DOWN (was RIGHT),
+    // Reload moves to RIGHT (was DOWN).
+    setTouchNavLabels("Exit", "Next", "Open", "Prev", "Reload");
   } else if (page == Page::Details) {
     setTouchNavLabels("Back", "Delete", "Run", "List", "Run");
   } else if (page == Page::Settings) {
-    setTouchNavLabels("Back", "Reload", "Open", "Prev", "Next");
+    // This page only handles LEFT (Back to the list) -- the other slots were
+    // stale copies of the List page's labels and didn't do anything here.
+    setTouchNavLabels("Back", nullptr, nullptr, nullptr, nullptr);
   }
   redrawTouchButtonBar();
 }
@@ -1290,12 +1294,14 @@ void loop() {
   if (dialog != Dialog::ConfirmDelete) {
     if (page == Page::List) {
       if (featureHasTouchNavBar()) {
+        // Prev/Next always sit on UP/DOWN: UP stays Prev, Next moves to
+        // DOWN (was RIGHT), Reload moves to RIGHT (was DOWN).
         if (pcfPressedEdge(ebUp))   { if (sel > 0) { updateListSelection(sel - 1); } return; }
-        if (pcfPressedEdge(ebDown)) { drawListPage(true); return; }
-        if (pcfPressedEdge(ebRight)) {
+        if (pcfPressedEdge(ebDown)) {
           if (sel < (int)items.size() - 1) { updateListSelection(sel + 1); }
           return;
         }
+        if (pcfPressedEdge(ebRight)) { drawListPage(true); return; }
         if (pcfPressedEdge(ebSelect)) {
           if (!items.empty()) { page = Page::Details; drawDetailsPage(); }
           return;
