@@ -10,12 +10,12 @@
 //
 // Adding a feature's info text: add one more InfoText to the right array
 // below, in the same order as its item-name array. Adding a language:
-// extend InfoLang/INFO_LANG_COUNT in Lang.h, then add one more string to
-// every InfoText{...} initializer here.
+// extend Lang/LANG_COUNT in Lang.h, then add one more string to every
+// InfoText{...} initializer here. See i18n/README.md for the full walkthrough.
 
 #include "Lang.h"
 
-extern const InfoText wifi_page0_info[8];
+extern const InfoText wifi_page0_info[9];
 extern const InfoText bluetooth_page0_info[8];
 extern const InfoText nrf_info[6];
 extern const InfoText subghz_info[5];

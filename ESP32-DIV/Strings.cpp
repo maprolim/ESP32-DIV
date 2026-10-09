@@ -1,0 +1,107 @@
+#include "Strings.h"
+#include "SettingsStore.h"
+
+// One row per StrKey, {EN, PT-BR, ES}, matching declaration order in
+// Strings.h exactly (STR_KEY_COUNT rows, compiler enforced by the array
+// size below). PT-BR/ES are kept strictly ASCII (no accents) on purpose --
+// these strings are drawn with TFT_eSPI's stock bitmap fonts, which only
+// cover plain ASCII. See i18n/README.md to add a language or a new key.
+const LocStr STRINGS[STR_KEY_COUNT] = {
+    // Main menu tiles
+    {"WiFi", "WiFi", "WiFi"},                                   // STR_TILE_WIFI
+    {"2.4GHz", "2.4GHz", "2.4GHz"},                              // STR_TILE_24GHZ
+    {"More", "Mais", "Mas"},                                     // STR_TILE_MORE
+    {"Settings", "Configuracoes", "Ajustes"},                    // STR_TILE_SETTINGS
+    {"Bluetooth", "Bluetooth", "Bluetooth"},                     // STR_TILE_BLUETOOTH
+    {"SubGHz", "SubGHz", "SubGHz"},                               // STR_TILE_SUBGHZ
+    {"Tools", "Ferramentas", "Herramientas"},                    // STR_TILE_TOOLS
+    {"About", "Sobre", "Acerca de"},                              // STR_TILE_ABOUT
+
+    // "More" tile's own grid
+    {"IR Remote", "Controle IR", "Control IR"},                  // STR_TILE_IR
+    {"RFID/NFC", "RFID/NFC", "RFID/NFC"},                        // STR_TILE_RFID
+    {"GPS", "GPS", "GPS"},                                        // STR_TILE_GPS
+    {"Main Menu", "Menu Principal", "Menu Principal"},           // STR_MAIN_MENU
+
+    // Shared trailing nav entry of every paged submenu list
+    {"Back to Main Menu", "Voltar ao Menu Principal", "Volver al Menu Principal"}, // STR_BACK_TO_MAIN_MENU
+
+    // Settings tile's own row labels
+    {"Brightness", "Brilho", "Brillo"},                          // STR_SETTINGS_BRIGHTNESS
+    {"Theme", "Tema", "Tema"},                                   // STR_SETTINGS_THEME
+    {"Accent", "Destaque", "Acento"},                            // STR_SETTINGS_ACCENT
+    {"NeoPixel", "NeoPixel", "NeoPixel"},                        // STR_SETTINGS_NEOPIXEL
+    {"Auto Scan", "Scan Automatico", "Escaneo Automatico"},      // STR_SETTINGS_AUTO_SCAN
+    {"Language", "Idioma", "Idioma"},                            // STR_SETTINGS_LANGUAGE
+
+    // WiFi features
+    {"Packet Monitor", "Monitor de Pacotes", "Monitor de Paquetes"},             // STR_WIFI_PACKET_MONITOR
+    {"Beacon Spammer", "Spammer de Beacons", "Spammer de Beacons"},              // STR_WIFI_BEACON_SPAMMER
+    {"WiFi 2.4GHz Deauther", "Desautenticador WiFi 2.4GHz", "Desautenticador WiFi 2.4GHz"}, // STR_WIFI_24GHZ_DEAUTHER
+    {"Probe Request Flood", "Inundacao de Probe Request", "Inundacion de Probe Request"},   // STR_WIFI_PROBE_REQUEST_FLOOD
+    {"Deauth Detector", "Detector de Desautenticacao", "Detector de Desautenticacion"},     // STR_WIFI_DEAUTH_DETECTOR
+    {"WiFi 2.4GHz Scanner", "Scanner WiFi 2.4GHz", "Escaner WiFi 2.4GHz"},       // STR_WIFI_24GHZ_SCANNER
+    {"Captive Portal", "Portal Cativo", "Portal Cautivo"},                       // STR_WIFI_CAPTIVE_PORTAL
+    {"Hidden SSID Revealer", "Revelador de SSID Oculto", "Revelador de SSID Oculto"},       // STR_WIFI_HIDDEN_SSID_REVEALER
+    {"WPS Scanner", "Scanner WPS", "Escaner WPS"},                              // STR_WIFI_WPS_SCANNER
+    {"ARP Scanner", "Scanner ARP", "Escaner ARP"},                              // STR_WIFI_ARP_SCANNER
+    {"Karma Attack", "Ataque Karma", "Ataque Karma"},                           // STR_WIFI_KARMA_ATTACK
+    {"Channel Graph", "Grafico de Canais", "Grafico de Canales"},               // STR_WIFI_CHANNEL_GRAPH
+
+    // Bluetooth features
+    {"BLE Jammer", "Bloqueador BLE", "Bloqueador BLE"},                         // STR_BT_BLE_JAMMER
+    {"BLE Spoofer", "Falsificador BLE", "Suplantador BLE"},                     // STR_BT_BLE_SPOOFER
+    {"Sour Apple", "Sour Apple", "Sour Apple"},                                 // STR_BT_SOUR_APPLE
+    {"AirTag Spoofer", "Falsificador de AirTag", "Suplantador de AirTag"},      // STR_BT_AIRTAG_SPOOFER
+    {"AirTag Sniffer", "Sniffer de AirTag", "Sniffer de AirTag"},               // STR_BT_AIRTAG_SNIFFER
+    {"Sniffer", "Sniffer", "Sniffer"},                                         // STR_BT_SNIFFER
+    {"BLE Scanner", "Scanner BLE", "Escaner BLE"},                             // STR_BT_BLE_SCANNER
+    {"BLE Rubber Ducky", "BLE Rubber Ducky", "BLE Rubber Ducky"},              // STR_BT_BLE_RUBBER_DUCKY
+    {"Skimmer Detect", "Deteccao de Skimmer", "Deteccion de Skimmer"},         // STR_BT_SKIMMER_DETECT
+
+    // nRF24 features
+    {"Scanner", "Scanner", "Escaner"},                                          // STR_NRF_SCANNER
+    {"Proto Kill", "Derrubar Protocolo", "Derribar Protocolo"},                 // STR_NRF_PROTO_KILL
+    {"ESB Sniffer", "Sniffer ESB", "Sniffer ESB"},                             // STR_NRF_ESB_SNIFFER
+    {"ESB Replay", "Replay ESB", "Replay ESB"},                                // STR_NRF_ESB_REPLAY
+    {"MouseJack Scan", "Scan MouseJack", "Escaneo MouseJack"},                 // STR_NRF_MOUSEJACK_SCAN
+    {"MouseJack Inject", "Injecao MouseJack", "Inyeccion MouseJack"},          // STR_NRF_MOUSEJACK_INJECT
+
+    // SubGHz features
+    {"Replay Attack", "Ataque de Replay", "Ataque de Replay"},                 // STR_SUBGHZ_REPLAY_ATTACK
+    {"SubGHz Jammer", "Bloqueador SubGHz", "Bloqueador SubGHz"},               // STR_SUBGHZ_JAMMER
+    {"De Bruijn / Brute", "De Bruijn / Forca Bruta", "De Bruijn / Fuerza Bruta"}, // STR_SUBGHZ_DE_BRUIJN_BRUTE
+    {"Jamming Detector", "Detector de Interferencia", "Detector de Interferencia"}, // STR_SUBGHZ_JAMMING_DETECTOR
+    {"Saved Profile", "Perfil Salvo", "Perfil Guardado"},                      // STR_SUBGHZ_SAVED_PROFILE
+
+    // Tools features
+    {"Serial Monitor", "Monitor Serial", "Monitor Serie"},                     // STR_TOOLS_SERIAL_MONITOR
+    {"Update Firmware", "Atualizar Firmware", "Actualizar Firmware"},          // STR_TOOLS_UPDATE_FIRMWARE
+    {"Touch Calibrate", "Calibrar Touch", "Calibrar Tactil"},                  // STR_TOOLS_TOUCH_CALIBRATE
+    {"SD File Manager", "Gerenciador de Arquivos SD", "Administrador de Archivos SD"}, // STR_TOOLS_SD_FILE_MANAGER
+
+    // RFID features
+    {"Card Reader", "Leitor de Cartao", "Lector de Tarjeta"},                  // STR_RFID_CARD_READER
+    {"Card Clone", "Clonar Cartao", "Clonar Tarjeta"},                         // STR_RFID_CARD_CLONE
+    {"Erase", "Apagar", "Borrar"},                                             // STR_RFID_ERASE
+    {"Dump", "Dump", "Dump"},                                                  // STR_RFID_DUMP
+    {"Decode Access", "Decodificar Acesso", "Decodificar Acceso"},            // STR_RFID_DECODE_ACCESS
+    {"Jam Reader", "Bloquear Leitor", "Bloquear Lector"},                     // STR_RFID_JAM_READER
+    {"Tag Disrupt", "Interromper Tag", "Interrumpir Tag"},                    // STR_RFID_TAG_DISRUPT
+    {"Disrupt Emulate", "Interromper e Emular", "Interrumpir y Emular"},      // STR_RFID_DISRUPT_EMULATE
+
+    // GPS features
+    {"Wardriver", "Wardriver", "Wardriver"},                                  // STR_GPS_WARDRIVER
+    {"Satellite Scanner", "Scanner de Satelites", "Escaner de Satelites"},    // STR_GPS_SATELLITE_SCANNER
+
+    // IR features
+    {"Record", "Gravar", "Grabar"},                                           // STR_IR_RECORD
+    {"Saved Profile", "Perfil Salvo", "Perfil Guardado"},                     // STR_IR_SAVED_PROFILE
+    {"Universal Controller", "Controle Universal", "Control Universal"},     // STR_IR_UNIVERSAL_CONTROLLER
+    {"Universal Controller A/C", "Controle Universal A/C", "Control Universal A/C"}, // STR_IR_UNIVERSAL_CONTROLLER_AC
+};
+
+const char* t(StrKey key) {
+  if (key >= STR_KEY_COUNT) return "?";  // guard against a bad/stale index
+  return locText(STRINGS[key], settings().infoLang);
+}

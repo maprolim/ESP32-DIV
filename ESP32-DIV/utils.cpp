@@ -12,6 +12,7 @@
 #include "gps.h"
 #include "shared.h"
 #include "utils.h"
+#include "Strings.h"
 
 bool notificationVisible = false;
 static bool notificationHasSave = false;
@@ -1575,15 +1576,19 @@ static void terminalHandleNavButtons() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+  // Already matched the layout (LEFT=Exit, SELECT=the most important
+  // action, RIGHT=secondary) -- only switched from isTouchNavButtonPressedEdge
+  // (touch-tap only) to isButtonPressedEdge so the physical buttons
+  // actually trigger these actions too.
+  if (isButtonPressedEdge(BTN_LEFT)) {
     feature_exit_requested = true;
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
+  if (isButtonPressedEdge(BTN_RIGHT)) {
     terminalCycleBaud();
     return;
   }
-  if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+  if (isButtonPressedEdge(BTN_SELECT)) {
     terminalSetActive(!terminalActive);
   }
 }
@@ -1813,8 +1818,12 @@ static int  sel = 0;
 static bool dirtySettings = false;
 static bool uiDirty = false;
 
-static const char* items[] = {"Brightness", "Theme", "Accent", "NeoPixel", "Auto Scan", "Info Language"};
-static const int N = sizeof(items)/sizeof(items[0]);
+// Resolved through t() at draw time (not baked into this array) so a
+// language change takes effect immediately; the font itself is loaded once
+// by the caller (handleSettingsSubmenuButtons() in ESP32-DIV.ino), not here.
+static const StrKey itemKeys[] = {STR_SETTINGS_BRIGHTNESS, STR_SETTINGS_THEME, STR_SETTINGS_ACCENT,
+                                   STR_SETTINGS_NEOPIXEL, STR_SETTINGS_AUTO_SCAN, STR_SETTINGS_LANGUAGE};
+static const int N = sizeof(itemKeys)/sizeof(itemKeys[0]);
 
 static uint8_t  last_brightness;
 static Theme    last_theme;
@@ -1834,10 +1843,11 @@ static bool saveDialog = false;     // true = dialogo "Salvar / Nao salvar" aber
 static int  saveSel = 1;            // 0=Salvar, 1=Nao salvar (pre-selecionado)
 static AppSettings snapshot;        // estado ao entrar (para "Nao salvar" reverter)
 
-// Tela de lista do "Info Language" (em vez de alternar com LEFT/RIGHT na
-// propria linha): abre ao apertar o meio em "Info Language", UP/DOWN
-// percorrem os idiomas cadastrados em INFO_LANG_NAMES, SELECT confirma,
-// LEFT cancela. Escala sozinha se INFO_LANG_COUNT crescer.
+// "Language" list screen (instead of cycling with LEFT/RIGHT on the row
+// itself): opens on SELECT over the "Language" row, UP/DOWN walk the
+// languages registered in LANG_NAMES, SELECT confirms, LEFT cancels. This
+// now picks the app-wide UI language (tiles, feature names, info screens),
+// not just the info-screen language -- scales on its own if LANG_COUNT grows.
 static bool langPicker = false;
 static void drawLangPicker();  // definida mais abaixo, perto de drawSaveDialog()
 static int  langPickerSel = 0;
@@ -1851,7 +1861,7 @@ static void drawTitle() {
   setTitleFont();
   tft.setTextColor(textStrong, UI.bg);
   tft.setCursor(PAD_X, TITLE_Y);
-  tft.print("Settings");
+  tft.print(t(STR_TILE_SETTINGS));
 }
 
 static void drawCardStatic(int i, bool selected) {
@@ -1869,7 +1879,7 @@ static void drawCardStatic(int i, bool selected) {
   tft.setTextColor(textDim, UI_BG);
   int ty = r.y + (r.h/2 - 6);
   tft.setCursor(r.x, ty);
-  tft.print(items[i]);
+  tft.print(t(itemKeys[i]));
 
   tft.drawLine(PAD_X, r.y + r.h - 1, SCREEN_W - PAD_X, r.y + r.h - 1, UI_LINE);
 }
@@ -2024,11 +2034,11 @@ static void drawAccent(uint8_t preset, bool selected) {
   drawAccentWidget(preset, selected);
 }
 
-// Linha "Info Language": mostra so o idioma atual (como a linha "Accent"
-// mostra so a cor atual) em vez de um par EN/PT com colchetes -- apertar
-// o meio (ou tocar na linha) abre uma TELA DE LISTA com os idiomas
-// disponiveis (ver langPicker abaixo). Isso escala bem quando mais
-// idiomas forem adicionados, em vez de ficar alternando com LEFT/RIGHT.
+// "Language" row: shows only the current language (like the "Accent" row
+// shows only the current color) instead of an EN/PT pair with brackets --
+// pressing SELECT (or tapping the row) opens a LIST SCREEN with the
+// available languages (see langPicker below). Scales well as more
+// languages are added, instead of cycling with LEFT/RIGHT.
 static Rect rInfoLangValue() {
   Rect r = rowRect(5);
   tft.setTextFont(2);
@@ -2482,10 +2492,10 @@ static void drawSaveDialog() {
                             saveSel == 1 ? FeatureUI::ButtonStyle::Primary : FeatureUI::ButtonStyle::Secondary);
 }
 
-// Tela de lista do "Info Language" -- um item por idioma cadastrado em
-// INFO_LANG_NAMES, "*" marca o idioma atualmente aplicado, a barra lateral
-// marca o cursor (langPickerSel). So fisico (UP/DOWN/SELECT/LEFT), mesma
-// pegada do dialogo "Salvar/Nao salvar" acima (sem toque).
+// "Language" list screen -- one row per language registered in LANG_NAMES,
+// "*" marks the currently applied language, the side bar marks the cursor
+// (langPickerSel). Physical input only (UP/DOWN/SELECT/LEFT), same feel as
+// the "Salvar/Nao salvar" dialog above (no touch).
 static void drawLangPicker() {
   tft.fillScreen(UI_BG);
   drawStatusBar(currentBatteryVoltage, true);
@@ -2493,7 +2503,7 @@ static void drawLangPicker() {
   setTitleFont();
   tft.setTextColor(textStrong, UI.bg);
   tft.setCursor(PAD_X, TITLE_Y);
-  tft.print("Info Language");
+  tft.print(t(STR_SETTINGS_LANGUAGE));
 
   const int startY = TITLE_Y + TITLE_H + 10;
   for (int i = 0; i < INFO_LANG_COUNT; ++i) {
@@ -2563,7 +2573,7 @@ void loop(){
   bool rightNow  = isButtonPressed(BTN_RIGHT);
   bool selectNow = isButtonPressed(BTN_SELECT);
 
-  // ================= Tela de lista "Info Language" =================
+  // ================= "Language" list screen =================
   if (langPicker) {
     if (upNow && !upWasDown && (now - lastNavMs > NAV_DEBOUNCE_MS)) {
       langPickerSel = (langPickerSel + INFO_LANG_COUNT - 1) % INFO_LANG_COUNT;
@@ -2686,7 +2696,7 @@ void loop(){
     if (sel == 5) {
       langPickerSel = settings().infoLang;
       langPicker = true;
-      drawLangPicker();                                           // "Info Language" abre lista
+      drawLangPicker();                                           // "Language" opens the list
     } else {
       editing = true; drawSelRow();                                // meio entra na edicao
     }
@@ -2806,7 +2816,10 @@ static void sdFmApplyNavLabels(const char* left, const char* down, const char* c
 }
 
 static void sdFmUpdateBrowserNavLabels() {
-  sdFmApplyNavLabels("Exit", "Next", "Refresh", "Prev", "Open");
+  // Remapped layout: SELECT=Open (the most important action, since it opens
+  // the selected file/folder; was Refresh), RIGHT=Refresh (secondary, was
+  // Open). Prev/Next were already correctly on UP/DOWN.
+  sdFmApplyNavLabels("Exit", "Next", "Open", "Prev", "Refresh");
 }
 
 static void sdFmUpdateInfoNavLabels() {
@@ -2829,45 +2842,50 @@ static void sdFmHandleNavButtons() {
   if (!featureHasTouchNavBar()) {
     return;
   }
+  // Also switched every branch from isTouchNavButtonPressedEdge (touch-tap
+  // only) to isButtonPressedEdge so the physical buttons actually trigger
+  // these actions too.
   if (page == Page::Browser) {
-    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    if (isButtonPressedEdge(BTN_LEFT)) {
       feature_exit_requested = true;
       return;
     }
-    if (isTouchNavButtonPressedEdge(BTN_UP) && !entries.empty()) {
+    if (isButtonPressedEdge(BTN_UP) && !entries.empty()) {
       sel--;
       clampSel();
       drawBrowserPage(false);
       return;
     }
-    if (isTouchNavButtonPressedEdge(BTN_DOWN) && !entries.empty()) {
+    if (isButtonPressedEdge(BTN_DOWN) && !entries.empty()) {
       sel++;
       clampSel();
       drawBrowserPage(false);
       return;
     }
-    if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
-      openSelected();
-      return;
-    }
-    if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+    // Remapped layout: SELECT=Open (the most important action, was RIGHT),
+    // RIGHT=Refresh (secondary, was SELECT).
+    if (isButtonPressedEdge(BTN_RIGHT)) {
       reloadDir(cwd, nullptr);
       drawBrowserPage(true);
+      return;
+    }
+    if (isButtonPressedEdge(BTN_SELECT)) {
+      openSelected();
     }
   } else if (page == Page::Info) {
-    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    if (isButtonPressedEdge(BTN_LEFT)) {
       drawBrowserPage();
       return;
     }
-    if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+    if (isButtonPressedEdge(BTN_SELECT)) {
       drawConfirmDeletePage();
     }
   } else if (page == Page::ConfirmDelete) {
-    if (isTouchNavButtonPressedEdge(BTN_LEFT)) {
+    if (isButtonPressedEdge(BTN_LEFT)) {
       drawBrowserPage();
       return;
     }
-    if (isTouchNavButtonPressedEdge(BTN_SELECT)) {
+    if (isButtonPressedEdge(BTN_SELECT)) {
       String err;
       const bool ok = deleteSelected(&err);
       if (!ok) {

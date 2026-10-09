@@ -4,6 +4,7 @@
 #include <Wire.h>
 #include "SettingsStore.h"
 #include "LangInfo.h"
+#include "Strings.h"
 #include "Touchscreen.h"
 #include "config.h"
 #include "ducky.h"
@@ -31,15 +32,15 @@ void setBrightness(uint8_t value) {
 bool feature_exit_requested = false;
 
 const int NUM_MENU_ITEMS = 8;
-const char *menu_items[NUM_MENU_ITEMS] = {
-    "WiFi",
-    "2.4GHz",
-    "More",
-    "Settings",
-    "Bluetooth",
-    "SubGHz",
-    "Tools",
-    "About"};
+const StrKey menu_items[NUM_MENU_ITEMS] = {
+    STR_TILE_WIFI,
+    STR_TILE_24GHZ,
+    STR_TILE_MORE,
+    STR_TILE_SETTINGS,
+    STR_TILE_BLUETOOTH,
+    STR_TILE_SUBGHZ,
+    STR_TILE_TOOLS,
+    STR_TILE_ABOUT};
 
 const unsigned char *bitmap_icons[NUM_MENU_ITEMS] = {
     bitmap_icon_wifi,
@@ -54,105 +55,82 @@ const unsigned char *bitmap_icons[NUM_MENU_ITEMS] = {
 int current_menu_index = 0;
 bool is_main_menu = false;
 
-const int NUM_SUBMENU_ITEMS = 12;
-const char *submenu_items[NUM_SUBMENU_ITEMS] = {
-    "Packet Monitor",
-    "Beacon Spammer",
-    "WiFi Deauther",
-    "Probe Request Flood",
-    "Deauth Detector",
-    "WiFi Scanner",
-    "Captive Portal",
-    "Hidden SSID Revealer",
-    "WPS Scanner",
-    "ARP Scanner",
-    "Karma Attack",
-    "Back to Main Menu"};
+// WiFi's 12 features as one flat list; the generic paged engine (below)
+// slices it into pages of kPagedItemsPerPage on its own.
+static constexpr int WIFI_FEATURE_COUNT = 12;
+const StrKey wifi_items[WIFI_FEATURE_COUNT] = {
+    STR_WIFI_PACKET_MONITOR,
+    STR_WIFI_BEACON_SPAMMER,
+    STR_WIFI_24GHZ_DEAUTHER,
+    STR_WIFI_PROBE_REQUEST_FLOOD,
+    STR_WIFI_DEAUTH_DETECTOR,
+    STR_WIFI_24GHZ_SCANNER,
+    STR_WIFI_CAPTIVE_PORTAL,
+    STR_WIFI_HIDDEN_SSID_REVEALER,
+    STR_WIFI_WPS_SCANNER,
+    STR_WIFI_ARP_SCANNER,
+    STR_WIFI_KARMA_ATTACK,
+    STR_WIFI_CHANNEL_GRAPH};
 
-// WiFi submenu is split across two pages (features after Hidden SSID on page 2).
-// Bottom row: icon | Main Menu                 Next/Prev Page | icon
-static constexpr int WIFI_PAGE0_FEATURES = 8;
-static constexpr int WIFI_PAGE1_FEATURES = 4;
-static int wifi_submenu_page = 0;
+// Info text (BTN_RIGHT on the WiFi menu) -- see wifi_page0_info in LangInfo.cpp;
+// only the first 9 items have text.
+static constexpr int WIFI_INFO_COUNT = 9;
 
-const char *wifi_page0_items[WIFI_PAGE0_FEATURES] = {
-    "Packet Monitor",
-    "Beacon Spammer",
-    "WiFi Deauther",
-    "Probe Request Flood",
-    "Deauth Detector",
-    "WiFi Scanner",
-    "Captive Portal",
-    "Hidden SSID Revealer"};
+// Bluetooth's 9 features as one flat list, same idea as WiFi above.
+static constexpr int BT_FEATURE_COUNT = 9;
+const StrKey bluetooth_items[BT_FEATURE_COUNT] = {
+    STR_BT_BLE_JAMMER,
+    STR_BT_BLE_SPOOFER,
+    STR_BT_SOUR_APPLE,
+    STR_BT_AIRTAG_SPOOFER,
+    STR_BT_AIRTAG_SNIFFER,
+    STR_BT_SNIFFER,
+    STR_BT_BLE_SCANNER,
+    STR_BT_BLE_RUBBER_DUCKY,
+    STR_BT_SKIMMER_DETECT};
 
-// Textos informativos (BTN_RIGHT no menu WiFi) -- ver wifi_page0_info em LangInfo.cpp,
-// mesma ordem de wifi_page0_items.
-
-const char *wifi_page1_items[WIFI_PAGE1_FEATURES] = {
-    "WPS Scanner",
-    "ARP Scanner",
-    "Karma Attack",
-    "Channel Graph"};
-
-// Bluetooth submenu uses the same paged footer layout as WiFi.
-static constexpr int BT_PAGE0_FEATURES = 8;
-static constexpr int BT_PAGE1_FEATURES = 1;
-static int bluetooth_submenu_page = 0;
-
-const char *bluetooth_page0_items[BT_PAGE0_FEATURES] = {
-    "BLE Jammer",
-    "BLE Spoofer",
-    "Sour Apple",
-    "AirTag Spoofer",
-    "AirTag Sniffer",
-    "Sniffer",
-    "BLE Scanner",
-    "BLE Rubber Ducky"};
-
-// Textos informativos (BTN_RIGHT) -- ver bluetooth_page0_info em LangInfo.cpp,
-// mesma ordem de bluetooth_page0_items.
-
-const char *bluetooth_page1_items[BT_PAGE1_FEATURES] = {
-    "Skimmer Detect"};
+// Info text (BTN_RIGHT) -- see bluetooth_page0_info in LangInfo.cpp;
+// only the first 8 items have text.
+static constexpr int BT_INFO_COUNT = 8;
 
 static FeatureUI::Button s_pagedFooterBtns[2];
 static int s_pagedFooterFocus = -1;  // 0=back, 1=page btn, -1=none
 
 const int nrf_NUM_SUBMENU_ITEMS = 7;
-const char *nrf_submenu_items[nrf_NUM_SUBMENU_ITEMS] = {
-    "Scanner",
-    "Proto Kill",
-    "ESB Sniffer",
-    "ESB Replay",
-    "MouseJack Scan",
-    "MouseJack Inject",
-    "Back to Main Menu"};
+const StrKey nrf_submenu_items[nrf_NUM_SUBMENU_ITEMS] = {
+    STR_NRF_SCANNER,
+    STR_NRF_PROTO_KILL,
+    STR_NRF_ESB_SNIFFER,
+    STR_NRF_ESB_REPLAY,
+    STR_NRF_MOUSEJACK_SCAN,
+    STR_NRF_MOUSEJACK_INJECT,
+    STR_BACK_TO_MAIN_MENU};
 
-// Textos informativos (BTN_RIGHT) -- ver nrf_info em LangInfo.cpp, mesma
-// ordem de nrf_submenu_items (sem o "Back").
+// Info text (BTN_RIGHT) -- see nrf_info in LangInfo.cpp, same order as
+// nrf_submenu_items (without "Back").
 
 const int subghz_NUM_SUBMENU_ITEMS = 6;
-const char *subghz_submenu_items[subghz_NUM_SUBMENU_ITEMS] = {
-    "Replay Attack",
-    "SubGHz Jammer",
-    "De Bruijn / Brute",
-    "Jamming Detector",
-    "Saved Profile",
-    "Back to Main Menu"};
+const StrKey subghz_submenu_items[subghz_NUM_SUBMENU_ITEMS] = {
+    STR_SUBGHZ_REPLAY_ATTACK,
+    STR_SUBGHZ_JAMMER,
+    STR_SUBGHZ_DE_BRUIJN_BRUTE,
+    STR_SUBGHZ_JAMMING_DETECTOR,
+    STR_SUBGHZ_SAVED_PROFILE,
+    STR_BACK_TO_MAIN_MENU};
 
-// Textos informativos (BTN_RIGHT) -- ver subghz_info em LangInfo.cpp, mesma
-// ordem de subghz_submenu_items (sem o "Back").
+// Info text (BTN_RIGHT) -- see subghz_info in LangInfo.cpp, same order as
+// subghz_submenu_items (without "Back").
 
 const int tools_NUM_SUBMENU_ITEMS = 5;
-const char *tools_submenu_items[tools_NUM_SUBMENU_ITEMS] = {
-    "Serial Monitor",
-    "Update Firmware",
-    "Touch Calibrate",
-    "SD File Manager",
-    "Back to Main Menu"};
+const StrKey tools_submenu_items[tools_NUM_SUBMENU_ITEMS] = {
+    STR_TOOLS_SERIAL_MONITOR,
+    STR_TOOLS_UPDATE_FIRMWARE,
+    STR_TOOLS_TOUCH_CALIBRATE,
+    STR_TOOLS_SD_FILE_MANAGER,
+    STR_BACK_TO_MAIN_MENU};
 
-// Textos informativos (BTN_RIGHT) -- ver tools_info em LangInfo.cpp, mesma
-// ordem de tools_submenu_items (sem o "Back").
+// Info text (BTN_RIGHT) -- see tools_info in LangInfo.cpp, same order as
+// tools_submenu_items (without "Back").
 
 static constexpr uint8_t OTHER_LAYER_HOME = 0;
 static constexpr uint8_t OTHER_LAYER_IR   = 1;
@@ -161,54 +139,54 @@ static constexpr uint8_t OTHER_LAYER_GPS  = 3;
 
 const int other_NUM_SUBMENU_ITEMS = 4;
 static constexpr int OTHER_GRID_COLS = 2;
-const char *other_submenu_items[other_NUM_SUBMENU_ITEMS] = {
-    "IR Remote",
-    "RFID/NFC",
-    "GPS",
-    "Main Menu"};
+const StrKey other_submenu_items[other_NUM_SUBMENU_ITEMS] = {
+    STR_TILE_IR,
+    STR_TILE_RFID,
+    STR_TILE_GPS,
+    STR_MAIN_MENU};
 
 const int rfid_NUM_SUBMENU_ITEMS = 9;
-const char *rfid_submenu_items[rfid_NUM_SUBMENU_ITEMS] = {
-    "Card Reader",
-    "Card Clone",
-    "Erase",
-    "Dump",
-    "Decode Access",
-    "Jam Reader",
-    "Tag Disrupt",
-    "Disrupt Emulate",
-    "Back to Main Menu"};
+const StrKey rfid_submenu_items[rfid_NUM_SUBMENU_ITEMS] = {
+    STR_RFID_CARD_READER,
+    STR_RFID_CARD_CLONE,
+    STR_RFID_ERASE,
+    STR_RFID_DUMP,
+    STR_RFID_DECODE_ACCESS,
+    STR_RFID_JAM_READER,
+    STR_RFID_TAG_DISRUPT,
+    STR_RFID_DISRUPT_EMULATE,
+    STR_BACK_TO_MAIN_MENU};
 
-// Textos informativos (BTN_RIGHT) -- ver rfid_info em LangInfo.cpp, mesma
-// ordem de rfid_submenu_items (sem o "Back").
+// Info text (BTN_RIGHT) -- see rfid_info in LangInfo.cpp, same order as
+// rfid_submenu_items (without "Back").
 
 const int gps_NUM_SUBMENU_ITEMS = 3;
-const char *gps_submenu_items[gps_NUM_SUBMENU_ITEMS] = {
-    "Wardriver",
-    "Satellite Scanner",
-    "Back to Main Menu"};
+const StrKey gps_submenu_items[gps_NUM_SUBMENU_ITEMS] = {
+    STR_GPS_WARDRIVER,
+    STR_GPS_SATELLITE_SCANNER,
+    STR_BACK_TO_MAIN_MENU};
 
-// Textos informativos (BTN_RIGHT) -- ver gps_info em LangInfo.cpp, mesma
-// ordem de gps_submenu_items (sem o "Back").
+// Info text (BTN_RIGHT) -- see gps_info in LangInfo.cpp, same order as
+// gps_submenu_items (without "Back").
 
 const int ir_NUM_SUBMENU_ITEMS = 5;
-const char *ir_submenu_items[ir_NUM_SUBMENU_ITEMS] = {
-    "Record",
-    "Saved Profile",
-    "Universal Controller",
-    "Universal Controller A/C",
-    "Back to Main Menu"};
+const StrKey ir_submenu_items[ir_NUM_SUBMENU_ITEMS] = {
+    STR_IR_RECORD,
+    STR_IR_SAVED_PROFILE,
+    STR_IR_UNIVERSAL_CONTROLLER,
+    STR_IR_UNIVERSAL_CONTROLLER_AC,
+    STR_BACK_TO_MAIN_MENU};
 
-// Textos informativos (BTN_RIGHT) -- ver ir_info em LangInfo.cpp, mesma
-// ordem de ir_submenu_items (sem o "Back").
+// Info text (BTN_RIGHT) -- see ir_info in LangInfo.cpp, same order as
+// ir_submenu_items (without "Back").
 
 const int about_NUM_SUBMENU_ITEMS = 1;
-const char *about_submenu_items[about_NUM_SUBMENU_ITEMS] = {
-    "Back to Main Menu"};
+const StrKey about_submenu_items[about_NUM_SUBMENU_ITEMS] = {
+    STR_BACK_TO_MAIN_MENU};
 
 const int setting_NUM_SUBMENU_ITEMS = 1;
-const char *setting_submenu_items[setting_NUM_SUBMENU_ITEMS] = {
-    "Back to Main Menu"};
+const StrKey setting_submenu_items[setting_NUM_SUBMENU_ITEMS] = {
+    STR_BACK_TO_MAIN_MENU};
 
 int current_submenu_index = 0;
 bool in_sub_menu = false;
@@ -217,11 +195,15 @@ bool submenu_initialized = false;
 uint8_t other_layer = OTHER_LAYER_HOME;
 int last_other_menu_index = -1;
 bool other_menu_grid_initialized = false;
+// Remembers which tile (IR=0 / RFID=1 / GPS=2) was selected on the "More"
+// grid, so going back from IR/RFID/GPS restores that tile instead of
+// always landing on the first one.
+int other_home_selected_tile = 0;
 
-const char **active_submenu_items = nullptr;
+const StrKey *active_submenu_items = nullptr;
 int active_submenu_size = 0;
 
-const unsigned char *wifi_submenu_icons[NUM_SUBMENU_ITEMS] = {
+const unsigned char *wifi_icons[WIFI_FEATURE_COUNT] = {
     bitmap_icon_wifi,
     bitmap_icon_antenna,
     bitmap_icon_wifi_jammer,
@@ -233,28 +215,10 @@ const unsigned char *wifi_submenu_icons[NUM_SUBMENU_ITEMS] = {
     bitmap_icon_key,
     bitmap_icon_list,
     bitmap_icon_devil,
-    bitmap_icon_go_back
-};
-
-const unsigned char *wifi_page0_icons[WIFI_PAGE0_FEATURES] = {
-    bitmap_icon_wifi,
-    bitmap_icon_antenna,
-    bitmap_icon_wifi_jammer,
-    bitmap_icon_Skull_3,
-    bitmap_icon_eye2,
-    bitmap_icon_jammer,
-    bitmap_icon_bash,
-    bitmap_icon_eye_blind
-};
-
-const unsigned char *wifi_page1_icons[WIFI_PAGE1_FEATURES] = {
-    bitmap_icon_key,
-    bitmap_icon_list,
-    bitmap_icon_devil,
     bitmap_icon_chart_dot
 };
 
-const unsigned char *bluetooth_page0_icons[BT_PAGE0_FEATURES] = {
+const unsigned char *bluetooth_icons[BT_FEATURE_COUNT] = {
     bitmap_icon_ble_jammer,
     bitmap_icon_spoofer,
     bitmap_icon_apple,
@@ -262,10 +226,7 @@ const unsigned char *bluetooth_page0_icons[BT_PAGE0_FEATURES] = {
     bitmap_icon_magnifying_glass,
     bitmap_icon_analyzer,
     bitmap_icon_graph,
-    bitmap_icon_rubber_ducky
-};
-
-const unsigned char *bluetooth_page1_icons[BT_PAGE1_FEATURES] = {
+    bitmap_icon_rubber_ducky,
     bitmap_icon_Wireless_4
 };
 
@@ -339,26 +300,78 @@ const unsigned char *setting_submenu_icons[setting_NUM_SUBMENU_ITEMS] = {
 
 const unsigned char **active_submenu_icons = nullptr;
 
-static int wifiFeatureCount() {
-    return (wifi_submenu_page == 0) ? WIFI_PAGE0_FEATURES : WIFI_PAGE1_FEATURES;
-}
+// ── Generic paged submenu engine ────────────────────────────────────────
+// Every list-style submenu (anything except the "More" tile grid) is driven
+// by the same engine: a flat items/icons array plus a total feature count,
+// paginated kPagedItemsPerPage at a time with "Back to Main Menu" as an
+// implicit footer button rather than a trailing array entry. A menu with
+// <=9 features just gets one page and no arrows; growing past 9 gets paging
+// for free, with no per-menu special-casing needed anywhere else.
+static const int kPagedItemsPerPage = 9;
+static int g_pagedPage = 0;  // shared cursor; reset whenever a submenu is (re)entered
 
-static int bluetoothFeatureCount() {
-    return (bluetooth_submenu_page == 0) ? BT_PAGE0_FEATURES : BT_PAGE1_FEATURES;
-}
-
-static int pagedFeatureCount() {
-    if (current_menu_index == 4) {
-        return bluetoothFeatureCount();
+static int pagedTotalCount() {
+    switch (current_menu_index) {
+        case 0: return WIFI_FEATURE_COUNT;
+        case 1: return nrf_NUM_SUBMENU_ITEMS - 1;
+        case 2:
+            if (other_layer == OTHER_LAYER_IR)   return ir_NUM_SUBMENU_ITEMS - 1;
+            if (other_layer == OTHER_LAYER_RFID) return rfid_NUM_SUBMENU_ITEMS - 1;
+            if (other_layer == OTHER_LAYER_GPS)  return gps_NUM_SUBMENU_ITEMS - 1;
+            return 0;  // HOME is the tile grid, not a paged list
+        case 4: return BT_FEATURE_COUNT;
+        case 5: return subghz_NUM_SUBMENU_ITEMS - 1;
+        case 6: return tools_NUM_SUBMENU_ITEMS - 1;
+        default: return 0;
     }
-    return wifiFeatureCount();
 }
 
-static int* pagedSubmenuPage() {
-    return (current_menu_index == 4) ? &bluetooth_submenu_page : &wifi_submenu_page;
+static const StrKey* pagedTotalItems() {
+    switch (current_menu_index) {
+        case 0: return wifi_items;
+        case 1: return nrf_submenu_items;
+        case 2:
+            if (other_layer == OTHER_LAYER_IR)   return ir_submenu_items;
+            if (other_layer == OTHER_LAYER_RFID) return rfid_submenu_items;
+            if (other_layer == OTHER_LAYER_GPS)  return gps_submenu_items;
+            return nullptr;
+        case 4: return bluetooth_items;
+        case 5: return subghz_submenu_items;
+        case 6: return tools_submenu_items;
+        default: return nullptr;
+    }
 }
 
-// Bottom row: [icon | Main Menu] ........ [Next/Prev Page | icon]
+static const unsigned char** pagedTotalIcons() {
+    switch (current_menu_index) {
+        case 0: return wifi_icons;
+        case 1: return nrf_submenu_icons;
+        case 2:
+            if (other_layer == OTHER_LAYER_IR)   return ir_submenu_icons;
+            if (other_layer == OTHER_LAYER_RFID) return rfid_submenu_icons;
+            if (other_layer == OTHER_LAYER_GPS)  return gps_submenu_icons;
+            return nullptr;
+        case 4: return bluetooth_icons;
+        case 5: return subghz_submenu_icons;
+        case 6: return tools_submenu_icons;
+        default: return nullptr;
+    }
+}
+
+static int pagedPageCount() {
+    const int n = (pagedTotalCount() + kPagedItemsPerPage - 1) / kPagedItemsPerPage;
+    return n > 0 ? n : 1;
+}
+
+// Items visible on the CURRENT page (< kPagedItemsPerPage on the last page).
+static int pagedFeatureCount() {
+    const int total = pagedTotalCount();
+    const int remain = total - g_pagedPage * kPagedItemsPerPage;
+    if (remain <= 0) return 0;
+    return remain < kPagedItemsPerPage ? remain : kPagedItemsPerPage;
+}
+
+// Bottom row: [icon | Main Menu] ........ [Next Page | icon] (only when >1 page)
 static int pagedBackBtnIndex() {
     return pagedFeatureCount();
 }
@@ -371,23 +384,33 @@ static int pagedNavRowY() {
     return tft.height() - 30;
 }
 
+// Row pitch for each feature in a paged submenu's list (icon + "| Label").
+// 9 * 28 = 252, well clear of pagedNavRowY() at height-30=290. Shared by the
+// list draw, the selection highlight redraw, the touch hit-test, and the
+// overflow-arrow placement — all must agree on this value or taps/highlights
+// land on the wrong row.
+static const int kPagedRowH = 28;
+
 static const char* pagedPageBtnLabel() {
-    return (*pagedSubmenuPage() == 0) ? "Next Page" : "Prev Page";
+    return "Next Page";  // always advances; wraps to page 0 after the last page
 }
 
 static const unsigned char* pagedPageBtnIcon() {
-    return (*pagedSubmenuPage() == 0) ? bitmap_icon_navigate_right : bitmap_icon_navigate_left;
+    return bitmap_icon_navigate_right;
 }
 
 static void layoutPagedFooterButtons() {
     const int y = pagedNavRowY();
-    const int mid = tft.width() / 2;
+    const bool multiPage = pagedPageCount() > 1;
+    const int w0 = multiPage ? tft.width() / 2 : tft.width();
     s_pagedFooterBtns[0] = {
-        0, (int16_t)y, (int16_t)mid, 28,
-        "Main Menu", FeatureUI::ButtonStyle::Secondary, false};
-    s_pagedFooterBtns[1] = {
-        (int16_t)mid, (int16_t)y, (int16_t)(tft.width() - mid), 28,
-        pagedPageBtnLabel(), FeatureUI::ButtonStyle::Secondary, false};
+        0, (int16_t)y, (int16_t)w0, 28,
+        t(STR_MAIN_MENU), FeatureUI::ButtonStyle::Secondary, false};
+    if (multiPage) {
+        s_pagedFooterBtns[1] = {
+            (int16_t)w0, (int16_t)y, (int16_t)(tft.width() - w0), 28,
+            pagedPageBtnLabel(), FeatureUI::ButtonStyle::Secondary, false};
+    }
 }
 
 static void drawPagedFooterButtons() {
@@ -395,6 +418,7 @@ static void drawPagedFooterButtons() {
     const int y = pagedNavRowY();
     const int rowH = 28;
     const int iconSize = 16;
+    const bool multiPage = pagedPageCount() > 1;
     tft.fillRect(0, y, tft.width(), rowH, UI_BG);
 
     tft.setTextDatum(TL_DATUM);
@@ -410,10 +434,10 @@ static void drawPagedFooterButtons() {
         tft.setTextColor(color, UI_BG);
         tft.drawBitmap(10, iconY, bitmap_icon_go_back, iconSize, iconSize, color);
         tft.setCursor(30, textY);
-        tft.print("Main Menu");
+        tft.print(t(STR_MAIN_MENU));
     }
 
-    {
+    if (multiPage) {
         const uint16_t color = (s_pagedFooterFocus == 1) ? UI_ICON : UI_TEXT;
         const char* label = pagedPageBtnLabel();
         const int gap = 4;
@@ -428,15 +452,16 @@ static void drawPagedFooterButtons() {
     }
 }
 
-static void applyWifiSubmenuPage() {
-    if (wifi_submenu_page == 0) {
-        active_submenu_items = wifi_page0_items;
-        active_submenu_icons = wifi_page0_icons;
-    } else {
-        active_submenu_items = wifi_page1_items;
-        active_submenu_icons = wifi_page1_icons;
-    }
-    active_submenu_size = wifiFeatureCount() + 2;
+// Slices active_submenu_items/icons to the current menu's current page and
+// resets the draw/selection state so the next displaySubmenu() does a full
+// redraw. Call after changing current_menu_index, other_layer, or g_pagedPage.
+static void pagedApplyPage() {
+    active_submenu_items = pagedTotalItems() + g_pagedPage * kPagedItemsPerPage;
+    active_submenu_icons = pagedTotalIcons() + g_pagedPage * kPagedItemsPerPage;
+    // +1 = features + Back. The "Next Page" footer button is reachable only
+    // by touch (see pagedSubmenuEdgeFlip) — left out of the cycle on purpose
+    // so UP/DOWN never land on it.
+    active_submenu_size = pagedFeatureCount() + 1;
     if (current_submenu_index >= active_submenu_size) {
         current_submenu_index = 0;
     }
@@ -445,77 +470,90 @@ static void applyWifiSubmenuPage() {
     submenu_initialized = false;
 }
 
-static void applyBluetoothSubmenuPage() {
-    if (bluetooth_submenu_page == 0) {
-        active_submenu_items = bluetooth_page0_items;
-        active_submenu_icons = bluetooth_page0_icons;
-    } else {
-        active_submenu_items = bluetooth_page1_items;
-        active_submenu_icons = bluetooth_page1_icons;
-    }
-    active_submenu_size = bluetoothFeatureCount() + 2;
-    if (current_submenu_index >= active_submenu_size) {
+// Shared by every paged submenu list. Pressing DOWN on the last feature of a
+// page jumps straight to the next page's first feature (if any), and
+// pressing UP on the first feature of a page jumps back to the previous
+// page's last feature (if any) — same feel as scrolling through one
+// continuous list. Returns true when it handled the move, so the caller
+// skips its normal +/-1 step.
+static bool pagedSubmenuEdgeFlip(bool goingDown) {
+    const int pageCount = pagedPageCount();
+    const int featureCount = pagedFeatureCount();
+
+    if (goingDown && current_submenu_index == featureCount - 1 && g_pagedPage < pageCount - 1) {
+        g_pagedPage++;
+        pagedApplyPage();
         current_submenu_index = 0;
+        return true;
     }
-    s_pagedFooterFocus = -1;
-    last_submenu_index = -1;
-    submenu_initialized = false;
+
+    if (!goingDown && current_submenu_index == 0 && g_pagedPage > 0) {
+        g_pagedPage--;
+        pagedApplyPage();
+        current_submenu_index = pagedFeatureCount() - 1;  // last item of the page we just landed on
+        return true;
+    }
+
+    return false;
+}
+
+// Shared touch targeting for any paged submenu list screen (everything
+// except WiFi/Bluetooth, which have their own richer touch dispatch).
+// Returns the index a tap landed on — 0..featureCount-1 for a feature row,
+// pagedBackBtnIndex() for "Main Menu" — so the caller can set
+// current_submenu_index and fall into its own per-index dispatch chain, same
+// as it already does for the physical SELECT path. Returns -1 if the tap was
+// fully handled here already (a page flip) or missed everything.
+static int pagedSubmenuTouchHit(int x, int y) {
+    layoutPagedFooterButtons();
+    const int n = (pagedPageCount() > 1) ? 2 : 1;
+    const int footerHit = FeatureUI::hit(s_pagedFooterBtns, n, x, y);
+    if (footerHit == 0) {
+        return pagedBackBtnIndex();
+    }
+    if (footerHit == 1) {
+        g_pagedPage = (g_pagedPage + 1) % pagedPageCount();
+        current_submenu_index = 0;
+        pagedApplyPage();
+        displaySubmenu();
+        delay(200);
+        return -1;
+    }
+    const int featureCount = pagedFeatureCount();
+    for (int i = 0; i < featureCount; i++) {
+        const int yPos = 30 + i * kPagedRowH;
+        if (x >= 10 && x <= 220 && y >= yPos && y <= yPos + kPagedRowH) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 void updateActiveSubmenu() {
+    g_pagedPage = 0;
     switch (current_menu_index) {
         case 0:
-            wifi_submenu_page = 0;
-            current_submenu_index = 0;
-            applyWifiSubmenuPage();
-            break;
         case 1:
-            active_submenu_items = nrf_submenu_items;
-            active_submenu_size = nrf_NUM_SUBMENU_ITEMS;
-            active_submenu_icons = nrf_submenu_icons;
+        case 4:
+        case 5:
+        case 6:
+            current_submenu_index = 0;
+            pagedApplyPage();
             break;
         case 2:
             if (other_layer == OTHER_LAYER_HOME) {
                 active_submenu_items = other_submenu_items;
                 active_submenu_size = other_NUM_SUBMENU_ITEMS;
                 active_submenu_icons = other_submenu_icons;
-            } else if (other_layer == OTHER_LAYER_IR) {
-                active_submenu_items = ir_submenu_items;
-                active_submenu_size = ir_NUM_SUBMENU_ITEMS;
-                active_submenu_icons = ir_submenu_icons;
-            } else if (other_layer == OTHER_LAYER_RFID) {
-                active_submenu_items = rfid_submenu_items;
-                active_submenu_size = rfid_NUM_SUBMENU_ITEMS;
-                active_submenu_icons = rfid_submenu_icons;
-            } else if (other_layer == OTHER_LAYER_GPS) {
-                active_submenu_items = gps_submenu_items;
-                active_submenu_size = gps_NUM_SUBMENU_ITEMS;
-                active_submenu_icons = gps_submenu_icons;
             } else {
-                active_submenu_items = other_submenu_items;
-                active_submenu_size = other_NUM_SUBMENU_ITEMS;
-                active_submenu_icons = other_submenu_icons;
+                current_submenu_index = 0;
+                pagedApplyPage();
             }
             break;
         case 3:
             active_submenu_items = nullptr;
             active_submenu_size = 0;
             active_submenu_icons = nullptr;
-            break;
-        case 4:
-            bluetooth_submenu_page = 0;
-            current_submenu_index = 0;
-            applyBluetoothSubmenuPage();
-            break;
-        case 5:
-            active_submenu_items = subghz_submenu_items;
-            active_submenu_size = subghz_NUM_SUBMENU_ITEMS;
-            active_submenu_icons = subghz_submenu_icons;
-            break;
-        case 6:
-            active_submenu_items = tools_submenu_items;
-            active_submenu_size = tools_NUM_SUBMENU_ITEMS;
-            active_submenu_icons = tools_submenu_icons;
             break;
         case 7:
             active_submenu_items = nullptr;
@@ -936,11 +974,53 @@ void displayOtherMenuGrid();
 void displayPagedSubmenu();
 
 // Last submenu item ("Back to Main Menu") is pinned to the bottom of the screen.
+// Used by the touch-tap loops in the simpler paged submenus (nRF24, SubGHz,
+// Tools, Other/IR/RFID/GPS) to find each row's on-screen Y — must match the
+// kPagedRowH pitch displayPagedSubmenu() actually draws at, and the "Back to
+// Main Menu" pin position matches the footer bar's own Y (pagedNavRowY()),
+// since Back is drawn there now instead of inline. Correct for the common,
+// single-page case; a menu that grows past kPagedItemsPerPage would still
+// get Next/Prev via the physical UP/DOWN edge-flip, just not via a touch tap
+// on the footer's "Next Page" half (not reachable through this loop).
 static int submenuItemY(int index) {
     if (active_submenu_size > 0 && index == active_submenu_size - 1) {
         return tft.height() - 30;
     }
-    return 30 + index * 30;
+    return 30 + index * kPagedRowH;
+}
+
+// A PT-BR/ES translation routinely runs longer than its English source
+// ("Settings" -> "Configurações"), which can overflow a 100px tile or a
+// list row's tap zone. Returns `s` unchanged when it already fits inside
+// maxWidth (measured with whatever font is currently loaded); otherwise
+// returns a truncated copy with a trailing "..." that does fit. Uses a
+// small rotating set of static buffers so it's safe to call more than once
+// in the same expression (e.g. textWidth(fitText(...)) then print(fitText(...))).
+static const char* fitText(const char* s, int maxWidth) {
+    if (!s || tft.textWidth(s) <= maxWidth) return s;
+
+    static char buf[4][40];
+    static int slot = 0;
+    char* out = buf[slot];
+    slot = (slot + 1) % 4;
+
+    // Reserve room for the trailing "..." (3 bytes) + NUL up front, so the
+    // strcat() below can never overflow `out` regardless of how much the
+    // while loop below ends up shortening `len` by.
+    const size_t maxLen = sizeof(buf[0]) - 1 - 3;
+    size_t len = strlen(s);
+    if (len > maxLen) len = maxLen;
+    memcpy(out, s, len);
+    out[len] = '\0';
+
+    while (len > 1) {
+        String withEllipsis = String(out) + "...";
+        if ((int)tft.textWidth(withEllipsis) <= maxWidth) break;
+        len--;
+        out[len] = '\0';
+    }
+    strcat(out, "...");
+    return out;
 }
 
 void displaySubmenu() {
@@ -951,7 +1031,14 @@ void displaySubmenu() {
         return;
     }
 
-    if (current_menu_index == 0 || current_menu_index == 4) {
+    // Every list-style submenu (WiFi, Bluetooth, nRF24, SubGHz, Tools, and
+    // the Other menu's IR/RFID/GPS layers) goes through the same generic
+    // paged renderer. The Other menu's HOME layer (tile grid, handled above)
+    // and Settings/About (custom screens, never reach this function) are the
+    // only exceptions.
+    if (current_menu_index == 0 || current_menu_index == 1 || current_menu_index == 4 ||
+        current_menu_index == 5 || current_menu_index == 6 ||
+        (current_menu_index == 2 && other_layer != OTHER_LAYER_HOME)) {
         displayPagedSubmenu();
         return;
     }
@@ -975,7 +1062,7 @@ void displaySubmenu() {
             if (!isBack) {
                 tft.print("| ");
             }
-            tft.print(active_submenu_items[i]);
+            tft.print(fitText(t(active_submenu_items[i]), 186));
         }
 
         submenu_initialized = true;
@@ -994,7 +1081,7 @@ void displaySubmenu() {
             if (!prevBack) {
                 tft.print("| ");
             }
-            tft.print(active_submenu_items[last_submenu_index]);
+            tft.print(fitText(t(active_submenu_items[last_submenu_index]), 186));
         }
 
         const int new_yPos = submenuItemY(current_submenu_index);
@@ -1007,12 +1094,45 @@ void displaySubmenu() {
         if (!newBack) {
             tft.print("| ");
         }
-        tft.print(active_submenu_items[current_submenu_index]);
+        tft.print(fitText(t(active_submenu_items[current_submenu_index]), 186));
 
         last_submenu_index = current_submenu_index;
     }
 
     drawStatusBar(currentBatteryVoltage, true);
+}
+
+// Tiny filled chevron hinting that the list continues onto the other page.
+// Purely informational — whether it's needed depends only on which of the
+// two pages is showing, never on the current selection, so it's drawn once
+// per full redraw rather than tracked like the selection highlight.
+//
+// Sits inline in the right margin of the row it belongs to (the last item's
+// row for the down arrow, the first item's row for the up arrow) instead of
+// on its own line below/above the list. Two earlier versions tried to fit it
+// into the vertical gap between the list and the footer/status bar instead,
+// but that gap is real screen space someone may reasonably expect an item to
+// use, which is exactly what was being complained about — reusing an
+// existing row's right margin (past the item touch hitbox, which stops at
+// x=220) claims no additional vertical space at all, regardless of screen
+// height or row pitch.
+static const int kPagedArrowHalfW = 4;
+static const int kPagedArrowHalfH = 3;
+static const int kPagedArrowX = 226;  // right margin, clear of the x<=220 item tap zone
+
+// cy = vertical center of the 16px icon/text row this arrow sits beside.
+static void drawPagedOverflowArrow(bool pointingDown, int cy) {
+    const int cx = kPagedArrowX;
+    tft.setTextColor(UI_TEXT, UI_BG);
+    if (pointingDown) {
+        tft.fillTriangle(cx - kPagedArrowHalfW, cy - kPagedArrowHalfH,
+                          cx + kPagedArrowHalfW, cy - kPagedArrowHalfH,
+                          cx, cy + kPagedArrowHalfH, UI_TEXT);
+    } else {
+        tft.fillTriangle(cx - kPagedArrowHalfW, cy + kPagedArrowHalfH,
+                          cx + kPagedArrowHalfW, cy + kPagedArrowHalfH,
+                          cx, cy - kPagedArrowHalfH, UI_TEXT);
+    }
 }
 
 void displayPagedSubmenu() {
@@ -1026,13 +1146,28 @@ void displayPagedSubmenu() {
     if (!submenu_initialized) {
         tft.fillScreen(UI_BG);
         for (int i = 0; i < featureCount; i++) {
-            const int yPos = 30 + i * 30;
+            const int yPos = 30 + i * kPagedRowH;
             tft.setTextColor(UI_TEXT, UI_BG);
             tft.drawBitmap(10, yPos, active_submenu_icons[i], 16, 16, UI_TEXT);
             tft.setCursor(30, yPos);
             tft.print("| ");
-            tft.print(active_submenu_items[i]);
+            tft.print(fitText(t(active_submenu_items[i]), 186));
         }
+
+        // Show a down arrow on this page's last item when there's a page after
+        // it, and an up arrow on the first item when there's a page before it
+        // — works for any number of pages, not just 2. Each arrow rides inline
+        // on the row it belongs to (see drawPagedOverflowArrow) rather than
+        // claiming a line of its own.
+        const int pageCount = pagedPageCount();
+        if (g_pagedPage < pageCount - 1) {
+            const int lastRowY = 30 + (featureCount - 1) * kPagedRowH;
+            drawPagedOverflowArrow(/*pointingDown=*/true, lastRowY + 8);
+        }
+        if (g_pagedPage > 0) {
+            drawPagedOverflowArrow(/*pointingDown=*/false, 30 + 8);
+        }
+
         drawPagedFooterButtons();
         submenu_initialized = true;
         last_submenu_index = -1;
@@ -1041,21 +1176,21 @@ void displayPagedSubmenu() {
 
     if (last_submenu_index != current_submenu_index) {
         if (last_submenu_index >= 0 && last_submenu_index < featureCount) {
-            const int prev_yPos = 30 + last_submenu_index * 30;
+            const int prev_yPos = 30 + last_submenu_index * kPagedRowH;
             tft.setTextColor(UI_TEXT, UI_BG);
             tft.drawBitmap(10, prev_yPos, active_submenu_icons[last_submenu_index], 16, 16, UI_TEXT);
             tft.setCursor(30, prev_yPos);
             tft.print("| ");
-            tft.print(active_submenu_items[last_submenu_index]);
+            tft.print(fitText(t(active_submenu_items[last_submenu_index]), 186));
         }
 
         if (current_submenu_index >= 0 && current_submenu_index < featureCount) {
-            const int new_yPos = 30 + current_submenu_index * 30;
+            const int new_yPos = 30 + current_submenu_index * kPagedRowH;
             tft.setTextColor(UI_ICON, UI_BG);
             tft.drawBitmap(10, new_yPos, active_submenu_icons[current_submenu_index], 16, 16, UI_ICON);
             tft.setCursor(30, new_yPos);
             tft.print("| ");
-            tft.print(active_submenu_items[current_submenu_index]);
+            tft.print(fitText(t(active_submenu_items[current_submenu_index]), 186));
             s_pagedFooterFocus = -1;
         } else if (current_submenu_index == pagedBackBtnIndex()) {
             s_pagedFooterFocus = 0;
@@ -1096,11 +1231,12 @@ void displayOtherMenuGrid() {
             tft.drawBitmap(x_position + 42, y_position + 10, other_submenu_icons[i], 16, 16, UI_ICON);
 
             tft.setTextColor(UI_TEXT, UI_FG);
-            int textWidth = tft.textWidth(other_submenu_items[i]);
+            const char* label = fitText(t(other_submenu_items[i]), 92);
+            int textWidth = tft.textWidth(label);
             int textX = x_position + (100 - textWidth) / 2;
             int textY = y_position + 30;
             tft.setCursor(textX, textY);
-            tft.print(other_submenu_items[i]);
+            tft.print(label);
         }
 
         other_menu_grid_initialized = true;
@@ -1120,11 +1256,12 @@ void displayOtherMenuGrid() {
                 tft.setTextColor(UI_TEXT, UI_FG);
                 tft.drawBitmap(x_position + 42, y_position + 10,
                                other_submenu_icons[last_other_menu_index], 16, 16, UI_ICON);
-                int textWidth = tft.textWidth(other_submenu_items[last_other_menu_index]);
+                const char* label = fitText(t(other_submenu_items[last_other_menu_index]), 92);
+                int textWidth = tft.textWidth(label);
                 int textX = x_position + (100 - textWidth) / 2;
                 int textY = y_position + 30;
                 tft.setCursor(textX, textY);
-                tft.print(other_submenu_items[last_other_menu_index]);
+                tft.print(label);
             }
         }
 
@@ -1139,11 +1276,12 @@ void displayOtherMenuGrid() {
         tft.setTextColor(UI_ICON, UI_FG);
         tft.drawBitmap(x_position + 42, y_position + 10, other_submenu_icons[current_submenu_index],
                        16, 16, SELECTED_ICON_COLOR);
-        int textWidth = tft.textWidth(other_submenu_items[current_submenu_index]);
+        const char* label = fitText(t(other_submenu_items[current_submenu_index]), 92);
+        int textWidth = tft.textWidth(label);
         int textX = x_position + (100 - textWidth) / 2;
         int textY = y_position + 30;
         tft.setCursor(textX, textY);
-        tft.print(other_submenu_items[current_submenu_index]);
+        tft.print(label);
 
         last_other_menu_index = current_submenu_index;
     }
@@ -1204,11 +1342,12 @@ const uint16_t icon_colors[NUM_MENU_ITEMS] = {
             }
 
             tft.setTextColor(UI_TEXT, UI_FG);
-            int textWidth = tft.textWidth(menu_items[i]);
+            const char* label = fitText(t(menu_items[i]), 92);
+            int textWidth = tft.textWidth(label);
             int textX = x_position + (100 - textWidth) / 2;
             int textY = y_position + 30;
             tft.setCursor(textX, textY);
-            tft.print(menu_items[i]);
+            tft.print(label);
         }
         menu_initialized = true;
         last_menu_index = -1;
@@ -1230,11 +1369,12 @@ const uint16_t icon_colors[NUM_MENU_ITEMS] = {
                 } else {
                     tft.drawBitmap(x_position + 42, y_position + 10, bitmap_icons[last_menu_index], 16, 16, icon_colors[last_menu_index]);
                 }
-                int textWidth = tft.textWidth(menu_items[last_menu_index]);
+                const char* label = fitText(t(menu_items[last_menu_index]), 92);
+                int textWidth = tft.textWidth(label);
                 int textX = x_position + (100 - textWidth) / 2;
                 int textY = y_position + 30;
                 tft.setCursor(textX, textY);
-                tft.print(menu_items[last_menu_index]);
+                tft.print(label);
             }
         }
 
@@ -1252,11 +1392,12 @@ const uint16_t icon_colors[NUM_MENU_ITEMS] = {
         } else {
             tft.drawBitmap(x_position + 42, y_position + 10, bitmap_icons[current_menu_index], 16, 16, SELECTED_ICON_COLOR);
         }
-        int textWidth = tft.textWidth(menu_items[current_menu_index]);
+        const char* label = fitText(t(menu_items[current_menu_index]), 92);
+        int textWidth = tft.textWidth(label);
         int textX = x_position + (100 - textWidth) / 2;
         int textY = y_position + 30;
         tft.setCursor(textX, textY);
-        tft.print(menu_items[current_menu_index]);
+        tft.print(label);
 
         last_menu_index = current_menu_index;
     }
@@ -1292,9 +1433,9 @@ static int drawWrappedParagraph(int x, int y, int maxWidth, int maxY, const char
     return y;
 }
 
-// Tela cheia com a info do item de menu selecionado quando o usuario aperta
-// BTN_RIGHT, no idioma escolhido em Settings > Info Language. BTN_LEFT volta
-// pro submenu de onde veio.
+// Full-screen info for the selected menu item when the user presses
+// BTN_RIGHT, in the language chosen under Settings > Language. BTN_LEFT goes
+// back to the submenu it was opened from.
 static void drawFeatureInfoScreen(const char* title, const InfoText& info) {
     tft.fillScreen(UI_BG);
     currentBatteryVoltage = readBatteryVoltage();
@@ -1349,7 +1490,7 @@ void handleWiFiSubmenuButtons() {
         in_sub_menu = false;
         feature_active = false;
         feature_exit_requested = false;
-        wifi_submenu_page = 0;
+        g_pagedPage = 0;
         displayMenu();
         handleButtons();
         is_main_menu = false;
@@ -1357,14 +1498,18 @@ void handleWiFiSubmenuButtons() {
     }
 
     if (isButtonPressed(BTN_UP)) {
-        current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
+        if (!pagedSubmenuEdgeFlip(/*goingDown=*/false)) {
+            current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
+        }
         last_interaction_time = millis();
         displaySubmenu();
         waitButtonReleased(BTN_UP);
     }
 
     if (isButtonPressed(BTN_DOWN)) {
-        current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
+        if (!pagedSubmenuEdgeFlip(/*goingDown=*/true)) {
+            current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
+        }
         last_interaction_time = millis();
         displaySubmenu();
         waitButtonReleased(BTN_DOWN);
@@ -1374,8 +1519,8 @@ void handleWiFiSubmenuButtons() {
     // (so nas 8 features da pagina 0, que tem texto cadastrado em wifi_page0_info_*).
     if (isButtonPressed(BTN_RIGHT)) {
         waitButtonReleased(BTN_RIGHT);
-        if (wifi_submenu_page == 0 && current_submenu_index < WIFI_PAGE0_FEATURES) {
-            showFeatureInfoScreen(wifi_page0_items[current_submenu_index],
+        if (g_pagedPage == 0 && current_submenu_index < WIFI_INFO_COUNT) {
+            showFeatureInfoScreen(t(wifi_items[current_submenu_index]),
                                   wifi_page0_info[current_submenu_index]);   // bloqueia ate soltar o BTN_LEFT
             // A tela de info usou a tela inteira; forcar redraw completo do
             // submenu (senao displaySubmenu() faz so o update incremental de
@@ -1391,29 +1536,23 @@ void handleWiFiSubmenuButtons() {
         last_interaction_time = millis();
         waitButtonReleased(BTN_SELECT);
 
-        // Footer: Next / Prev
-        if (current_submenu_index == pagedPageBtnIndex()) {
-            wifi_submenu_page = (wifi_submenu_page == 0) ? 1 : 0;
-            current_submenu_index = 0;
-            applyWifiSubmenuPage();
-            displaySubmenu();
-            delay(200);
-            return;
-        }
+        // The "Next/Prev Page" footer slot is touch-only (see
+        // pagedSubmenuEdgeFlip) — UP/DOWN can no longer land current_submenu_index
+        // on it, so there is no SELECT branch for it here anymore.
 
         // Footer: Back to Main Menu
         if (current_submenu_index == pagedBackBtnIndex()) {
             in_sub_menu = false;
             feature_active = false;
             feature_exit_requested = false;
-            wifi_submenu_page = 0;
+            g_pagedPage = 0;
             displayMenu();
             handleButtons();
             is_main_menu = false;
             return;
         }
 
-        if (wifi_submenu_page == 0 && current_submenu_index == 0) {
+        if (g_pagedPage == 0 && current_submenu_index == 0) {
             current_submenu_index = 0;
             in_sub_menu = true;
             feature_active = true;
@@ -1440,7 +1579,7 @@ void handleWiFiSubmenuButtons() {
             }
         }
 
-        if (wifi_submenu_page == 0 && current_submenu_index == 1) {
+        if (g_pagedPage == 0 && current_submenu_index == 1) {
             current_submenu_index = 1;
             in_sub_menu = true;
             feature_active = true;
@@ -1468,7 +1607,7 @@ void handleWiFiSubmenuButtons() {
             }
         }
 
-        if (wifi_submenu_page == 0 && current_submenu_index == 2) {
+        if (g_pagedPage == 0 && current_submenu_index == 2) {
             current_submenu_index = 2;
             in_sub_menu = true;
             feature_active = true;
@@ -1494,7 +1633,7 @@ void handleWiFiSubmenuButtons() {
             }
         }
 
-        if (wifi_submenu_page == 0 && current_submenu_index == 3) {
+        if (g_pagedPage == 0 && current_submenu_index == 3) {
             current_submenu_index = 3;
             in_sub_menu = true;
             feature_active = true;
@@ -1521,7 +1660,7 @@ void handleWiFiSubmenuButtons() {
             }
         }
 
-        if (wifi_submenu_page == 0 && current_submenu_index == 4) {
+        if (g_pagedPage == 0 && current_submenu_index == 4) {
             current_submenu_index = 4;
             in_sub_menu = true;
             feature_active = true;
@@ -1544,7 +1683,7 @@ void handleWiFiSubmenuButtons() {
             }
         }
 
-        if (wifi_submenu_page == 0 && current_submenu_index == 5) {
+        if (g_pagedPage == 0 && current_submenu_index == 5) {
             current_submenu_index = 5;
             in_sub_menu = true;
             feature_active = true;
@@ -1566,7 +1705,7 @@ void handleWiFiSubmenuButtons() {
                 delay(200);
             }
         }
-        if (wifi_submenu_page == 0 && current_submenu_index == 6) {
+        if (g_pagedPage == 0 && current_submenu_index == 6) {
             current_submenu_index = 6;
             in_sub_menu = true;
             feature_active = true;
@@ -1588,7 +1727,7 @@ void handleWiFiSubmenuButtons() {
                 delay(200);
             }
         }
-        if (wifi_submenu_page == 0 && current_submenu_index == 7) {
+        if (g_pagedPage == 0 && current_submenu_index == 7) {
             current_submenu_index = 7;
             in_sub_menu = true;
             feature_active = true;
@@ -1610,14 +1749,17 @@ void handleWiFiSubmenuButtons() {
                 delay(200);
             }
         }
-        if (wifi_submenu_page == 1 && current_submenu_index == 0) {
-            current_submenu_index = 0;
+        // WPS Scanner moved from page1 slot 0 to page0 slot 8 so 9 items fit
+        // on page 0 (was 8); page1's 3 remaining items (ARP Scanner, Karma
+        // Attack, Channel Graph) were renumbered down by one slot to follow.
+        if (g_pagedPage == 0 && current_submenu_index == 8) {
+            current_submenu_index = 8;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             WpsScanner::wpsScannerSetup();
-            while (wifi_submenu_page == 1 && current_submenu_index == 0 && !feature_exit_requested) {
-                current_submenu_index = 0;
+            while (current_submenu_index == 8 && !feature_exit_requested) {
+                current_submenu_index = 8;
                 in_sub_menu = true;
                 WpsScanner::wpsScannerLoop();
             }
@@ -1632,14 +1774,14 @@ void handleWiFiSubmenuButtons() {
                 delay(200);
             }
         }
-        if (wifi_submenu_page == 1 && current_submenu_index == 1) {
-            current_submenu_index = 1;
+        if (g_pagedPage == 1 && current_submenu_index == 0) {
+            current_submenu_index = 0;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             ArpScanner::arpScannerSetup();
-            while (wifi_submenu_page == 1 && current_submenu_index == 1 && !feature_exit_requested) {
-                current_submenu_index = 1;
+            while (g_pagedPage == 1 && current_submenu_index == 0 && !feature_exit_requested) {
+                current_submenu_index = 0;
                 in_sub_menu = true;
                 ArpScanner::arpScannerLoop();
             }
@@ -1654,14 +1796,14 @@ void handleWiFiSubmenuButtons() {
                 delay(200);
             }
         }
-        if (wifi_submenu_page == 1 && current_submenu_index == 2) {
-            current_submenu_index = 2;
+        if (g_pagedPage == 1 && current_submenu_index == 1) {
+            current_submenu_index = 1;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             KarmaAttack::karmaSetup();
-            while (wifi_submenu_page == 1 && current_submenu_index == 2 && !feature_exit_requested) {
-                current_submenu_index = 2;
+            while (g_pagedPage == 1 && current_submenu_index == 1 && !feature_exit_requested) {
+                current_submenu_index = 1;
                 in_sub_menu = true;
                 KarmaAttack::karmaLoop();
             }
@@ -1676,14 +1818,14 @@ void handleWiFiSubmenuButtons() {
                 delay(200);
             }
         }
-        if (wifi_submenu_page == 1 && current_submenu_index == 3) {
-            current_submenu_index = 3;
+        if (g_pagedPage == 1 && current_submenu_index == 2) {
+            current_submenu_index = 2;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             ChannelGraph::channelGraphSetup();
-            while (wifi_submenu_page == 1 && current_submenu_index == 3 && !feature_exit_requested) {
-                current_submenu_index = 3;
+            while (g_pagedPage == 1 && current_submenu_index == 2 && !feature_exit_requested) {
+                current_submenu_index = 2;
                 in_sub_menu = true;
                 ChannelGraph::channelGraphLoop();
                 // LEFT exits here (not SELECT/featureExitButtonPressed): SELECT is
@@ -1719,7 +1861,7 @@ void handleWiFiSubmenuButtons() {
         delay(10);
 
         layoutPagedFooterButtons();
-        const int footerHit = FeatureUI::hit(s_pagedFooterBtns, 2, x, y);
+        const int footerHit = FeatureUI::hit(s_pagedFooterBtns, (pagedPageCount() > 1) ? 2 : 1, x, y);
         if (footerHit == 0) {
             // Left: Main Menu
             current_submenu_index = pagedBackBtnIndex();
@@ -1729,7 +1871,7 @@ void handleWiFiSubmenuButtons() {
             in_sub_menu = false;
             feature_active = false;
             feature_exit_requested = false;
-            wifi_submenu_page = 0;
+            g_pagedPage = 0;
             displayMenu();
             handleButtons();
             is_main_menu = false;
@@ -1741,22 +1883,22 @@ void handleWiFiSubmenuButtons() {
             last_interaction_time = millis();
             displaySubmenu();
             delay(120);
-            wifi_submenu_page = (wifi_submenu_page == 0) ? 1 : 0;
+            g_pagedPage = (g_pagedPage + 1) % pagedPageCount();
             current_submenu_index = 0;
-            applyWifiSubmenuPage();
+            pagedApplyPage();
             displaySubmenu();
             delay(200);
             return;
         }
 
-        const int featureCount = wifiFeatureCount();
+        const int featureCount = pagedFeatureCount();
         for (int i = 0; i < featureCount; i++) {
-            int yPos = 30 + i * 30;
+            int yPos = 30 + i * kPagedRowH;
 
             int button_x1 = 10;
             int button_y1 = yPos;
             int button_x2 = 220;
-            int button_y2 = yPos + 30;
+            int button_y2 = yPos + kPagedRowH;
 
             if (x >= button_x1 && x <= button_x2 && y >= button_y1 && y <= button_y2) {
                 current_submenu_index = i;
@@ -1764,7 +1906,7 @@ void handleWiFiSubmenuButtons() {
                 displaySubmenu();
                 delay(200);
 
-                if (wifi_submenu_page == 0 && current_submenu_index == 0) {
+                if (g_pagedPage == 0 && current_submenu_index == 0) {
                     current_submenu_index = 0;
                     in_sub_menu = true;
                     feature_active = true;
@@ -1789,7 +1931,7 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 0 && current_submenu_index == 1) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 1) {
                     current_submenu_index = 1;
                     in_sub_menu = true;
                     feature_active = true;
@@ -1815,7 +1957,7 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 0 && current_submenu_index == 2) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 2) {
                     current_submenu_index = 2;
                     in_sub_menu = true;
                     feature_active = true;
@@ -1840,7 +1982,7 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 0 && current_submenu_index == 3) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 3) {
                     current_submenu_index = 3;
                     in_sub_menu = true;
                     feature_active = true;
@@ -1865,7 +2007,7 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 0 && current_submenu_index == 4) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 4) {
                     current_submenu_index = 4;
                     in_sub_menu = true;
                     feature_active = true;
@@ -1886,7 +2028,7 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 0 && current_submenu_index == 5) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 5) {
                     current_submenu_index = 5;
                     in_sub_menu = true;
                     feature_active = true;
@@ -1907,7 +2049,7 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 0 && current_submenu_index == 6) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 6) {
                     current_submenu_index = 6;
                     in_sub_menu = true;
                     feature_active = true;
@@ -1928,7 +2070,7 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 0 && current_submenu_index == 7) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 7) {
                     current_submenu_index = 7;
                     in_sub_menu = true;
                     feature_active = true;
@@ -1949,14 +2091,16 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 1 && current_submenu_index == 0) {
-                    current_submenu_index = 0;
+                } else if (g_pagedPage == 0 && current_submenu_index == 8) {
+                    // See the matching comment in the physical-button dispatch above:
+                    // WPS Scanner moved here from page1 slot 0 so 9 items fit on page 0.
+                    current_submenu_index = 8;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     WpsScanner::wpsScannerSetup();
-                    while (wifi_submenu_page == 1 && current_submenu_index == 0 && !feature_exit_requested) {
-                        current_submenu_index = 0;
+                    while (current_submenu_index == 8 && !feature_exit_requested) {
+                        current_submenu_index = 8;
                         in_sub_menu = true;
                         WpsScanner::wpsScannerLoop();
                     }
@@ -1970,14 +2114,14 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 1 && current_submenu_index == 1) {
-                    current_submenu_index = 1;
+                } else if (g_pagedPage == 1 && current_submenu_index == 0) {
+                    current_submenu_index = 0;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     ArpScanner::arpScannerSetup();
-                    while (wifi_submenu_page == 1 && current_submenu_index == 1 && !feature_exit_requested) {
-                        current_submenu_index = 1;
+                    while (g_pagedPage == 1 && current_submenu_index == 0 && !feature_exit_requested) {
+                        current_submenu_index = 0;
                         in_sub_menu = true;
                         ArpScanner::arpScannerLoop();
                     }
@@ -1991,14 +2135,14 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 1 && current_submenu_index == 2) {
-                    current_submenu_index = 2;
+                } else if (g_pagedPage == 1 && current_submenu_index == 1) {
+                    current_submenu_index = 1;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     KarmaAttack::karmaSetup();
-                    while (wifi_submenu_page == 1 && current_submenu_index == 2 && !feature_exit_requested) {
-                        current_submenu_index = 2;
+                    while (g_pagedPage == 1 && current_submenu_index == 1 && !feature_exit_requested) {
+                        current_submenu_index = 1;
                         in_sub_menu = true;
                         KarmaAttack::karmaLoop();
                     }
@@ -2012,14 +2156,14 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (wifi_submenu_page == 1 && current_submenu_index == 3) {
-                    current_submenu_index = 3;
+                } else if (g_pagedPage == 1 && current_submenu_index == 2) {
+                    current_submenu_index = 2;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     ChannelGraph::channelGraphSetup();
-                    while (wifi_submenu_page == 1 && current_submenu_index == 3 && !feature_exit_requested) {
-                        current_submenu_index = 3;
+                    while (g_pagedPage == 1 && current_submenu_index == 2 && !feature_exit_requested) {
+                        current_submenu_index = 2;
                         in_sub_menu = true;
                         ChannelGraph::channelGraphLoop();
                         // LEFT exits here (not SELECT/featureExitButtonPressed): SELECT is
@@ -2059,7 +2203,7 @@ void handleBluetoothSubmenuButtons() {
         in_sub_menu = false;
         feature_active = false;
         feature_exit_requested = false;
-        bluetooth_submenu_page = 0;
+        g_pagedPage = 0;
         displayMenu();
         handleButtons();
         is_main_menu = false;
@@ -2067,14 +2211,18 @@ void handleBluetoothSubmenuButtons() {
     }
 
     if (isButtonPressed(BTN_UP)) {
-        current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
+        if (!pagedSubmenuEdgeFlip(/*goingDown=*/false)) {
+            current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
+        }
         last_interaction_time = millis();
         displaySubmenu();
         waitButtonReleased(BTN_UP);
     }
 
     if (isButtonPressed(BTN_DOWN)) {
-        current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
+        if (!pagedSubmenuEdgeFlip(/*goingDown=*/true)) {
+            current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
+        }
         last_interaction_time = millis();
         displaySubmenu();
         waitButtonReleased(BTN_DOWN);
@@ -2084,8 +2232,8 @@ void handleBluetoothSubmenuButtons() {
     // (so nas 8 features da pagina 0, que tem texto cadastrado em bluetooth_page0_info_*).
     if (isButtonPressed(BTN_RIGHT)) {
         waitButtonReleased(BTN_RIGHT);
-        if (bluetooth_submenu_page == 0 && current_submenu_index < BT_PAGE0_FEATURES) {
-            showFeatureInfoScreen(bluetooth_page0_items[current_submenu_index],
+        if (g_pagedPage == 0 && current_submenu_index < BT_INFO_COUNT) {
+            showFeatureInfoScreen(t(bluetooth_items[current_submenu_index]),
                                   bluetooth_page0_info[current_submenu_index]);
             submenu_initialized = false;
             last_submenu_index = -1;
@@ -2098,51 +2246,35 @@ void handleBluetoothSubmenuButtons() {
         last_interaction_time = millis();
         waitButtonReleased(BTN_SELECT);
 
-        if (current_submenu_index == pagedPageBtnIndex()) {
-            bluetooth_submenu_page = (bluetooth_submenu_page == 0) ? 1 : 0;
-            current_submenu_index = 0;
-            applyBluetoothSubmenuPage();
-            displaySubmenu();
-            delay(200);
-            return;
-        }
+        // The "Next/Prev Page" footer slot is touch-only (see
+        // pagedSubmenuEdgeFlip) — UP/DOWN can no longer land current_submenu_index
+        // on it, so there is no SELECT branch for it here anymore.
 
         if (current_submenu_index == pagedBackBtnIndex()) {
             in_sub_menu = false;
             feature_active = false;
             feature_exit_requested = false;
-            bluetooth_submenu_page = 0;
+            g_pagedPage = 0;
             displayMenu();
             handleButtons();
             is_main_menu = false;
             return;
         }
 
-        if (bluetooth_submenu_page == 0 && current_submenu_index == 0) {
+        if (g_pagedPage == 0 && current_submenu_index == 0) {
             current_submenu_index = 0;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             BleJammer::blejamSetup();
-            while (bluetooth_submenu_page == 0 && current_submenu_index == 0 && !feature_exit_requested) {
+            while (g_pagedPage == 0 && current_submenu_index == 0 && !feature_exit_requested) {
                 current_submenu_index = 0;
                 in_sub_menu = true;
                 BleJammer::blejamLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             BleJammer::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2153,31 +2285,20 @@ void handleBluetoothSubmenuButtons() {
             }
         }
 
-        if (bluetooth_submenu_page == 0 && current_submenu_index == 1) {
+        if (g_pagedPage == 0 && current_submenu_index == 1) {
             current_submenu_index = 1;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             BleSpoofer::spooferSetup();
-            while (bluetooth_submenu_page == 0 && current_submenu_index == 1 && !feature_exit_requested) {
+            while (g_pagedPage == 0 && current_submenu_index == 1 && !feature_exit_requested) {
                 current_submenu_index = 1;
                 in_sub_menu = true;
                 BleSpoofer::spooferLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             BleSpoofer::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2188,31 +2309,20 @@ void handleBluetoothSubmenuButtons() {
             }
         }
 
-        if (bluetooth_submenu_page == 0 && current_submenu_index == 2) {
+        if (g_pagedPage == 0 && current_submenu_index == 2) {
             current_submenu_index = 2;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             SourApple::sourappleSetup();
-            while (bluetooth_submenu_page == 0 && current_submenu_index == 2 && !feature_exit_requested) {
+            while (g_pagedPage == 0 && current_submenu_index == 2 && !feature_exit_requested) {
                 current_submenu_index = 2;
                 in_sub_menu = true;
                 SourApple::sourappleLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             SourApple::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2223,31 +2333,20 @@ void handleBluetoothSubmenuButtons() {
             }
         }
 
-        if (bluetooth_submenu_page == 0 && current_submenu_index == 3) {
+        if (g_pagedPage == 0 && current_submenu_index == 3) {
             current_submenu_index = 3;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             AirTagSpoofer::airTagSetup();
-            while (bluetooth_submenu_page == 0 && current_submenu_index == 3 && !feature_exit_requested) {
+            while (g_pagedPage == 0 && current_submenu_index == 3 && !feature_exit_requested) {
                 current_submenu_index = 3;
                 in_sub_menu = true;
                 AirTagSpoofer::airTagLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             AirTagSpoofer::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2258,31 +2357,20 @@ void handleBluetoothSubmenuButtons() {
             }
         }
 
-        if (bluetooth_submenu_page == 0 && current_submenu_index == 4) {
+        if (g_pagedPage == 0 && current_submenu_index == 4) {
             current_submenu_index = 4;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             AirTagSniffer::airTagSnifferSetup();
-            while (bluetooth_submenu_page == 0 && current_submenu_index == 4 && !feature_exit_requested) {
+            while (g_pagedPage == 0 && current_submenu_index == 4 && !feature_exit_requested) {
                 current_submenu_index = 4;
                 in_sub_menu = true;
                 AirTagSniffer::airTagSnifferLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             AirTagSniffer::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2293,31 +2381,20 @@ void handleBluetoothSubmenuButtons() {
             }
         }
 
-        if (bluetooth_submenu_page == 0 && current_submenu_index == 5) {
+        if (g_pagedPage == 0 && current_submenu_index == 5) {
             current_submenu_index = 5;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             BleSniffer::blesnifferSetup();
-            while (bluetooth_submenu_page == 0 && current_submenu_index == 5 && !feature_exit_requested) {
+            while (g_pagedPage == 0 && current_submenu_index == 5 && !feature_exit_requested) {
                 current_submenu_index = 5;
                 in_sub_menu = true;
                 BleSniffer::blesnifferLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             BleSniffer::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2328,31 +2405,20 @@ void handleBluetoothSubmenuButtons() {
             }
         }
 
-        if (bluetooth_submenu_page == 0 && current_submenu_index == 6) {
+        if (g_pagedPage == 0 && current_submenu_index == 6) {
             current_submenu_index = 6;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             BleScan::bleScanSetup();
-            while (bluetooth_submenu_page == 0 && current_submenu_index == 6 && !feature_exit_requested) {
+            while (g_pagedPage == 0 && current_submenu_index == 6 && !feature_exit_requested) {
                 current_submenu_index = 6;
                 in_sub_menu = true;
                 BleScan::bleScanLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             BleScan::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2362,35 +2428,26 @@ void handleBluetoothSubmenuButtons() {
                 delay(200);
             }
         }
-        if (bluetooth_submenu_page == 0 && current_submenu_index == 7) {
+        if (g_pagedPage == 0 && current_submenu_index == 7) {
             runBleDuckyFeature();
         }
 
-        if (bluetooth_submenu_page == 1 && current_submenu_index == 0) {
-            current_submenu_index = 0;
+        // Skimmer Detect: was page1/slot0 back when BT was split 8+1; now all
+        // 9 BT features fit on one page, so this is slot 8 of page 0.
+        if (g_pagedPage == 0 && current_submenu_index == 8) {
+            current_submenu_index = 8;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
             BleSkimmer::bleSkimmerSetup();
-            while (bluetooth_submenu_page == 1 && current_submenu_index == 0 && !feature_exit_requested) {
-                current_submenu_index = 0;
+            while (current_submenu_index == 8 && !feature_exit_requested) {
+                current_submenu_index = 8;
                 in_sub_menu = true;
                 BleSkimmer::bleSkimmerLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             BleSkimmer::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2408,7 +2465,7 @@ void handleBluetoothSubmenuButtons() {
         delay(10);
 
         layoutPagedFooterButtons();
-        const int footerHit = FeatureUI::hit(s_pagedFooterBtns, 2, x, y);
+        const int footerHit = FeatureUI::hit(s_pagedFooterBtns, (pagedPageCount() > 1) ? 2 : 1, x, y);
         if (footerHit == 0) {
             current_submenu_index = pagedBackBtnIndex();
             last_interaction_time = millis();
@@ -2417,7 +2474,7 @@ void handleBluetoothSubmenuButtons() {
             in_sub_menu = false;
             feature_active = false;
             feature_exit_requested = false;
-            bluetooth_submenu_page = 0;
+            g_pagedPage = 0;
             displayMenu();
             handleButtons();
             is_main_menu = false;
@@ -2428,22 +2485,22 @@ void handleBluetoothSubmenuButtons() {
             last_interaction_time = millis();
             displaySubmenu();
             delay(120);
-            bluetooth_submenu_page = (bluetooth_submenu_page == 0) ? 1 : 0;
+            g_pagedPage = (g_pagedPage + 1) % pagedPageCount();
             current_submenu_index = 0;
-            applyBluetoothSubmenuPage();
+            pagedApplyPage();
             displaySubmenu();
             delay(200);
             return;
         }
 
-        const int featureCount = bluetoothFeatureCount();
+        const int featureCount = pagedFeatureCount();
         for (int i = 0; i < featureCount; i++) {
-            int yPos = 30 + i * 30;
+            int yPos = 30 + i * kPagedRowH;
 
             int button_x1 = 10;
             int button_y1 = yPos;
             int button_x2 = 220;
-            int button_y2 = yPos + 30;
+            int button_y2 = yPos + kPagedRowH;
 
             if (x >= button_x1 && x <= button_x2 && y >= button_y1 && y <= button_y2) {
                 current_submenu_index = i;
@@ -2451,31 +2508,20 @@ void handleBluetoothSubmenuButtons() {
                 displaySubmenu();
                 delay(200);
 
-                if (bluetooth_submenu_page == 0 && current_submenu_index == 0) {
+                if (g_pagedPage == 0 && current_submenu_index == 0) {
                     current_submenu_index = 0;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     BleJammer::blejamSetup();
-                    while (bluetooth_submenu_page == 0 && current_submenu_index == 0 && !feature_exit_requested) {
+                    while (g_pagedPage == 0 && current_submenu_index == 0 && !feature_exit_requested) {
                         current_submenu_index = 0;
                         in_sub_menu = true;
                         BleJammer::blejamLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     BleJammer::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -2484,31 +2530,20 @@ void handleBluetoothSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (bluetooth_submenu_page == 0 && current_submenu_index == 1) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 1) {
                     current_submenu_index = 1;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     BleSpoofer::spooferSetup();
-                    while (bluetooth_submenu_page == 0 && current_submenu_index == 1 && !feature_exit_requested) {
+                    while (g_pagedPage == 0 && current_submenu_index == 1 && !feature_exit_requested) {
                         current_submenu_index = 1;
                         in_sub_menu = true;
                         BleSpoofer::spooferLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     BleSpoofer::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -2517,31 +2552,20 @@ void handleBluetoothSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (bluetooth_submenu_page == 0 && current_submenu_index == 2) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 2) {
                     current_submenu_index = 2;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     SourApple::sourappleSetup();
-                    while (bluetooth_submenu_page == 0 && current_submenu_index == 2 && !feature_exit_requested) {
+                    while (g_pagedPage == 0 && current_submenu_index == 2 && !feature_exit_requested) {
                         current_submenu_index = 2;
                         in_sub_menu = true;
                         SourApple::sourappleLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     SourApple::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -2550,31 +2574,20 @@ void handleBluetoothSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (bluetooth_submenu_page == 0 && current_submenu_index == 3) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 3) {
                     current_submenu_index = 3;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     AirTagSpoofer::airTagSetup();
-                    while (bluetooth_submenu_page == 0 && current_submenu_index == 3 && !feature_exit_requested) {
+                    while (g_pagedPage == 0 && current_submenu_index == 3 && !feature_exit_requested) {
                         current_submenu_index = 3;
                         in_sub_menu = true;
                         AirTagSpoofer::airTagLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     AirTagSpoofer::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -2583,31 +2596,20 @@ void handleBluetoothSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (bluetooth_submenu_page == 0 && current_submenu_index == 4) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 4) {
                     current_submenu_index = 4;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     AirTagSniffer::airTagSnifferSetup();
-                    while (bluetooth_submenu_page == 0 && current_submenu_index == 4 && !feature_exit_requested) {
+                    while (g_pagedPage == 0 && current_submenu_index == 4 && !feature_exit_requested) {
                         current_submenu_index = 4;
                         in_sub_menu = true;
                         AirTagSniffer::airTagSnifferLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     AirTagSniffer::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -2616,31 +2618,20 @@ void handleBluetoothSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (bluetooth_submenu_page == 0 && current_submenu_index == 5) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 5) {
                     current_submenu_index = 5;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     BleSniffer::blesnifferSetup();
-                    while (bluetooth_submenu_page == 0 && current_submenu_index == 5 && !feature_exit_requested) {
+                    while (g_pagedPage == 0 && current_submenu_index == 5 && !feature_exit_requested) {
                         current_submenu_index = 5;
                         in_sub_menu = true;
                         BleSniffer::blesnifferLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     BleSniffer::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -2649,31 +2640,20 @@ void handleBluetoothSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (bluetooth_submenu_page == 0 && current_submenu_index == 6) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 6) {
                     current_submenu_index = 6;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     BleScan::bleScanSetup();
-                    while (bluetooth_submenu_page == 0 && current_submenu_index == 6 && !feature_exit_requested) {
+                    while (g_pagedPage == 0 && current_submenu_index == 6 && !feature_exit_requested) {
                         current_submenu_index = 6;
                         in_sub_menu = true;
                         BleScan::bleScanLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     BleScan::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -2682,33 +2662,22 @@ void handleBluetoothSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (bluetooth_submenu_page == 0 && current_submenu_index == 7) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 7) {
                     runBleDuckyFeature();
-                } else if (bluetooth_submenu_page == 1 && current_submenu_index == 0) {
-                    current_submenu_index = 0;
+                } else if (g_pagedPage == 0 && current_submenu_index == 8) {
+                    current_submenu_index = 8;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
                     BleSkimmer::bleSkimmerSetup();
-                    while (bluetooth_submenu_page == 1 && current_submenu_index == 0 && !feature_exit_requested) {
-                        current_submenu_index = 0;
+                    while (current_submenu_index == 8 && !feature_exit_requested) {
+                        current_submenu_index = 8;
                         in_sub_menu = true;
                         BleSkimmer::bleSkimmerLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     BleSkimmer::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -2723,7 +2692,6 @@ void handleBluetoothSubmenuButtons() {
         }
     }
 }
-
 void handleNRFSubmenuButtons() {
     if (isButtonPressed(BTN_LEFT)) {   // "<" fisico volta ao menu principal
         waitButtonReleased(BTN_LEFT);  // espera soltar de verdade (evita reler o mesmo toque)
@@ -2737,9 +2705,8 @@ void handleNRFSubmenuButtons() {
     }
 
     if (isButtonPressed(BTN_UP)) {
-        current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
-        if (current_submenu_index < 0) {
-            current_submenu_index = NUM_SUBMENU_ITEMS - 1;
+        if (!pagedSubmenuEdgeFlip(/*goingDown=*/false)) {
+            current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         }
         last_interaction_time = millis();
         displaySubmenu();
@@ -2747,9 +2714,8 @@ void handleNRFSubmenuButtons() {
     }
 
     if (isButtonPressed(BTN_DOWN)) {
-        current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
-        if (current_submenu_index >= NUM_SUBMENU_ITEMS) {
-            current_submenu_index = 0;
+        if (!pagedSubmenuEdgeFlip(/*goingDown=*/true)) {
+            current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
         }
         last_interaction_time = millis();
         displaySubmenu();
@@ -2761,7 +2727,7 @@ void handleNRFSubmenuButtons() {
     if (isButtonPressed(BTN_RIGHT)) {
         waitButtonReleased(BTN_RIGHT);
         if (current_submenu_index < nrf_NUM_SUBMENU_ITEMS - 1) {
-            showFeatureInfoScreen(nrf_submenu_items[current_submenu_index],
+            showFeatureInfoScreen(t(nrf_submenu_items[current_submenu_index]),
                                   nrf_info[current_submenu_index]);
             submenu_initialized = false;
             last_submenu_index = -1;
@@ -2793,21 +2759,10 @@ void handleNRFSubmenuButtons() {
                 current_submenu_index = 0;
                 in_sub_menu = true;
                 Scanner::scannerLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             Scanner::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2828,21 +2783,10 @@ void handleNRFSubmenuButtons() {
                 current_submenu_index = 1;
                 in_sub_menu = true;
                 ProtoKill::prokillLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             ProtoKill::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2863,21 +2807,10 @@ void handleNRFSubmenuButtons() {
                 current_submenu_index = 2;
                 in_sub_menu = true;
                 EsbSniffer::esbSnifferLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             EsbSniffer::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2898,21 +2831,10 @@ void handleNRFSubmenuButtons() {
                 current_submenu_index = 3;
                 in_sub_menu = true;
                 EsbReplay::esbReplayLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             EsbReplay::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2933,21 +2855,10 @@ void handleNRFSubmenuButtons() {
                 current_submenu_index = 4;
                 in_sub_menu = true;
                 MouseJack::mouseJackLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             MouseJack::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -2968,21 +2879,10 @@ void handleNRFSubmenuButtons() {
                 current_submenu_index = 5;
                 in_sub_menu = true;
                 MouseJackInject::mouseJackInjectLoop();
-                if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             MouseJackInject::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -3029,21 +2929,10 @@ void handleNRFSubmenuButtons() {
                         current_submenu_index = 0;
                         in_sub_menu = true;
                         Scanner::scannerLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     Scanner::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3062,21 +2951,10 @@ void handleNRFSubmenuButtons() {
                         current_submenu_index = 1;
                         in_sub_menu = true;
                         ProtoKill::prokillLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     ProtoKill::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3095,21 +2973,10 @@ void handleNRFSubmenuButtons() {
                         current_submenu_index = 2;
                         in_sub_menu = true;
                         EsbSniffer::esbSnifferLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     EsbSniffer::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3128,21 +2995,10 @@ void handleNRFSubmenuButtons() {
                         current_submenu_index = 3;
                         in_sub_menu = true;
                         EsbReplay::esbReplayLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     EsbReplay::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3161,21 +3017,10 @@ void handleNRFSubmenuButtons() {
                         current_submenu_index = 4;
                         in_sub_menu = true;
                         MouseJack::mouseJackLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     MouseJack::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3194,21 +3039,10 @@ void handleNRFSubmenuButtons() {
                         current_submenu_index = 5;
                         in_sub_menu = true;
                         MouseJackInject::mouseJackInjectLoop();
-                        if (isButtonPressed(BTN_SELECT) || featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     MouseJackInject::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3223,7 +3057,6 @@ void handleNRFSubmenuButtons() {
         }
     }
 }
-
 void handleSubGHzSubmenuButtons() {
     if (isButtonPressed(BTN_LEFT)) {   // "<" fisico volta ao menu principal
         waitButtonReleased(BTN_LEFT);  // espera soltar de verdade (evita reler o mesmo toque)
@@ -3237,9 +3070,8 @@ void handleSubGHzSubmenuButtons() {
     }
 
     if (isButtonPressed(BTN_UP)) {
-        current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
-        if (current_submenu_index < 0) {
-            current_submenu_index = NUM_SUBMENU_ITEMS - 1;
+        if (!pagedSubmenuEdgeFlip(/*goingDown=*/false)) {
+            current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
         }
         last_interaction_time = millis();
         displaySubmenu();
@@ -3247,9 +3079,8 @@ void handleSubGHzSubmenuButtons() {
     }
 
     if (isButtonPressed(BTN_DOWN)) {
-        current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
-        if (current_submenu_index >= NUM_SUBMENU_ITEMS) {
-            current_submenu_index = 0;
+        if (!pagedSubmenuEdgeFlip(/*goingDown=*/true)) {
+            current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
         }
         last_interaction_time = millis();
         displaySubmenu();
@@ -3261,7 +3092,7 @@ void handleSubGHzSubmenuButtons() {
     if (isButtonPressed(BTN_RIGHT)) {
         waitButtonReleased(BTN_RIGHT);
         if (current_submenu_index < subghz_NUM_SUBMENU_ITEMS - 1) {
-            showFeatureInfoScreen(subghz_submenu_items[current_submenu_index],
+            showFeatureInfoScreen(t(subghz_submenu_items[current_submenu_index]),
                                   subghz_info[current_submenu_index]);
             submenu_initialized = false;
             last_submenu_index = -1;
@@ -3293,20 +3124,9 @@ void handleSubGHzSubmenuButtons() {
                 current_submenu_index = 0;
                 in_sub_menu = true;
                 replayat::ReplayAttackLoop();
-                if (featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -3327,21 +3147,10 @@ void handleSubGHzSubmenuButtons() {
                 current_submenu_index = 1;
                 in_sub_menu = true;
                 subjammer::subjammerLoop();
-                if (featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             subjammer::exit();
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -3362,20 +3171,9 @@ void handleSubGHzSubmenuButtons() {
                 current_submenu_index = 2;
                 in_sub_menu = true;
                 SubBrute::subBruteLoop();
-                if (featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -3396,20 +3194,9 @@ void handleSubGHzSubmenuButtons() {
                 current_submenu_index = 3;
                 in_sub_menu = true;
                 jammingdetector::Loop();
-                if (featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -3430,20 +3217,9 @@ void handleSubGHzSubmenuButtons() {
                 current_submenu_index = 4;
                 in_sub_menu = true;
                 SavedProfile::saveLoop();
-                if (featureExitButtonPressed()) {
-                    in_sub_menu = true;
-                    is_main_menu = false;
-                    submenu_initialized = false;
-                    feature_active = false;
-                    feature_exit_requested = false;
-                    displaySubmenu();
-                    delay(200);
-                    while (isButtonPressed(BTN_SELECT)) {
-                    }
-                    break;
-                }
             }
             if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -3490,20 +3266,9 @@ void handleSubGHzSubmenuButtons() {
                         current_submenu_index = 0;
                         in_sub_menu = true;
                         replayat::ReplayAttackLoop();
-                        if (featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3522,21 +3287,10 @@ void handleSubGHzSubmenuButtons() {
                         current_submenu_index = 1;
                         in_sub_menu = true;
                         subjammer::subjammerLoop();
-                        if (featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     subjammer::exit();
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3555,20 +3309,9 @@ void handleSubGHzSubmenuButtons() {
                         current_submenu_index = 2;
                         in_sub_menu = true;
                         SubBrute::subBruteLoop();
-                        if (featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3587,20 +3330,9 @@ void handleSubGHzSubmenuButtons() {
                         current_submenu_index = 3;
                         in_sub_menu = true;
                         jammingdetector::Loop();
-                        if (featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3619,20 +3351,9 @@ void handleSubGHzSubmenuButtons() {
                         current_submenu_index = 4;
                         in_sub_menu = true;
                         SavedProfile::saveLoop();
-                        if (featureExitButtonPressed()) {
-                            in_sub_menu = true;
-                            is_main_menu = false;
-                            submenu_initialized = false;
-                            feature_active = false;
-                            feature_exit_requested = false;
-                            displaySubmenu();
-                            delay(200);
-                            while (isButtonPressed(BTN_SELECT)) {
-                            }
-                            break;
-                        }
                     }
                     if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
                         is_main_menu = false;
                         submenu_initialized = false;
@@ -3666,7 +3387,9 @@ static void runToolsFeatureExitCleanup() {
     resetTouchNavHeldState();
     displaySubmenu();
     delay(200);
-    while (isButtonPressed(BTN_SELECT)) {
+    // Remapped layout: LEFT exits now (was SELECT) -- wait for its release
+    // so the submenu above doesn't re-read the same press as "back" again.
+    while (isButtonPressed(BTN_LEFT)) {
     }
 }
 
@@ -3685,9 +3408,13 @@ static void runToolsFeature(int idx, void (*setupFn)(), void (*loopFn)()) {
         in_sub_menu = true;
         loopFn();
         if (feature_exit_requested) {
+            waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
             break;
         }
-        if (!useTouchNav && isButtonPressed(BTN_SELECT)) {
+        // Remapped layout: LEFT exits now (was SELECT) -- Touch Calibrate
+        // doesn't use the touch nav bar (it needs raw touch input), so it
+        // falls back to a direct physical-button check here.
+        if (!useTouchNav && isButtonPressed(BTN_LEFT)) {
             break;
         }
     }
@@ -3712,7 +3439,6 @@ static void launchToolsFeature(int idx) {
             break;
     }
 }
-
 void handleToolsSubmenuButtons() {
     if (isButtonPressed(BTN_LEFT)) {   // "<" fisico volta ao menu principal
         waitButtonReleased(BTN_LEFT);  // espera soltar de verdade (evita reler o mesmo toque)
@@ -3726,14 +3452,18 @@ void handleToolsSubmenuButtons() {
     }
 
     if (isButtonPressed(BTN_UP)) {
-        current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
+        if (!pagedSubmenuEdgeFlip(/*goingDown=*/false)) {
+            current_submenu_index = (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
+        }
         last_interaction_time = millis();
         displaySubmenu();
         waitButtonReleased(BTN_UP);
     }
 
     if (isButtonPressed(BTN_DOWN)) {
-        current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
+        if (!pagedSubmenuEdgeFlip(/*goingDown=*/true)) {
+            current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
+        }
         last_interaction_time = millis();
         displaySubmenu();
         waitButtonReleased(BTN_DOWN);
@@ -3744,7 +3474,7 @@ void handleToolsSubmenuButtons() {
     if (isButtonPressed(BTN_RIGHT)) {
         waitButtonReleased(BTN_RIGHT);
         if (current_submenu_index < tools_NUM_SUBMENU_ITEMS - 1) {
-            showFeatureInfoScreen(tools_submenu_items[current_submenu_index],
+            showFeatureInfoScreen(t(tools_submenu_items[current_submenu_index]),
                                   tools_info[current_submenu_index]);
             submenu_initialized = false;
             last_submenu_index = -1;
@@ -3988,35 +3718,39 @@ void handleOtherSubmenuButtons() {
         }
     } else {
         if (isButtonPressed(BTN_UP)) {
-            current_submenu_index =
-                (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
+            if (!pagedSubmenuEdgeFlip(/*goingDown=*/false)) {
+                current_submenu_index =
+                    (current_submenu_index - 1 + active_submenu_size) % active_submenu_size;
+            }
             last_interaction_time = millis();
             displaySubmenu();
             waitButtonReleased(BTN_UP);
         }
 
         if (isButtonPressed(BTN_DOWN)) {
-            current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
+            if (!pagedSubmenuEdgeFlip(/*goingDown=*/true)) {
+                current_submenu_index = (current_submenu_index + 1) % active_submenu_size;
+            }
             last_interaction_time = millis();
             displaySubmenu();
             waitButtonReleased(BTN_DOWN);
         }
 
-        // RIGHT no item selecionado: abre uma tela cheia com a info, no
-        // idioma escolhido em Settings > Info Language (nao mostra no ultimo
-        // item de cada lista, "Back to Main Menu").
+        // RIGHT on the selected item: opens a full-screen info page, in the
+        // language chosen under Settings > Language (not shown on each
+        // list's last item, "Back to Main Menu").
         if (isButtonPressed(BTN_RIGHT)) {
             waitButtonReleased(BTN_RIGHT);
             const char* infoTitle = nullptr;
             const InfoText* infoRef = nullptr;
             if (other_layer == OTHER_LAYER_IR && current_submenu_index < ir_NUM_SUBMENU_ITEMS - 1) {
-                infoTitle = ir_submenu_items[current_submenu_index];
+                infoTitle = t(ir_submenu_items[current_submenu_index]);
                 infoRef = &ir_info[current_submenu_index];
             } else if (other_layer == OTHER_LAYER_RFID && current_submenu_index < rfid_NUM_SUBMENU_ITEMS - 1) {
-                infoTitle = rfid_submenu_items[current_submenu_index];
+                infoTitle = t(rfid_submenu_items[current_submenu_index]);
                 infoRef = &rfid_info[current_submenu_index];
             } else if (other_layer == OTHER_LAYER_GPS && current_submenu_index < gps_NUM_SUBMENU_ITEMS - 1) {
-                infoTitle = gps_submenu_items[current_submenu_index];
+                infoTitle = t(gps_submenu_items[current_submenu_index]);
                 infoRef = &gps_info[current_submenu_index];
             }
             if (infoTitle && infoRef) {
@@ -4034,7 +3768,7 @@ void handleOtherSubmenuButtons() {
             other_layer = OTHER_LAYER_HOME;
             other_menu_grid_initialized = false;
             last_other_menu_index = -1;
-            current_submenu_index = 0;
+            current_submenu_index = other_home_selected_tile;
             feature_active = false;
             feature_exit_requested = false;
             updateActiveSubmenu();
@@ -4060,6 +3794,7 @@ void handleOtherSubmenuButtons() {
                 handleButtons();
                 is_main_menu = false;
             } else if (current_submenu_index == 0) {
+                other_home_selected_tile = 0;
                 other_layer = OTHER_LAYER_IR;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
@@ -4068,6 +3803,7 @@ void handleOtherSubmenuButtons() {
                 submenu_initialized = false;
                 displaySubmenu();
             } else if (current_submenu_index == 1) {
+                other_home_selected_tile = 1;
                 other_layer = OTHER_LAYER_RFID;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
@@ -4076,6 +3812,7 @@ void handleOtherSubmenuButtons() {
                 submenu_initialized = false;
                 displaySubmenu();
             } else if (current_submenu_index == 2) {
+                other_home_selected_tile = 2;
                 other_layer = OTHER_LAYER_GPS;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
@@ -4089,7 +3826,7 @@ void handleOtherSubmenuButtons() {
                 other_layer = OTHER_LAYER_HOME;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
-                current_submenu_index = 0;
+                current_submenu_index = other_home_selected_tile;
                 feature_active = false;
                 feature_exit_requested = false;
                 updateActiveSubmenu();
@@ -4106,20 +3843,9 @@ void handleOtherSubmenuButtons() {
                     current_submenu_index = 0;
                     in_sub_menu = true;
                     IRRemoteFeature::loop();
-                    if (featureExitButtonPressed()) {
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                        while (featureExitButtonPressed()) {
-                        }
-                        break;
-                    }
                 }
                 if (feature_exit_requested) {
+                    waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                     in_sub_menu = true;
                     is_main_menu = false;
                     submenu_initialized = false;
@@ -4138,20 +3864,9 @@ void handleOtherSubmenuButtons() {
                     current_submenu_index = 1;
                     in_sub_menu = true;
                     IRSavedProfile::loop();
-                    if (featureExitButtonPressed()) {
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                        while (featureExitButtonPressed()) {
-                        }
-                        break;
-                    }
                 }
                 if (feature_exit_requested) {
+                    waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                     in_sub_menu = true;
                     is_main_menu = false;
                     submenu_initialized = false;
@@ -4172,6 +3887,7 @@ void handleOtherSubmenuButtons() {
                     IRUniversalController::loop();
                 }
                 if (feature_exit_requested) {
+                    waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                     in_sub_menu = true;
                     is_main_menu = false;
                     submenu_initialized = false;
@@ -4192,6 +3908,7 @@ void handleOtherSubmenuButtons() {
                     IRUniversalAC::loop();
                 }
                 if (feature_exit_requested) {
+                    waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                     in_sub_menu = true;
                     is_main_menu = false;
                     submenu_initialized = false;
@@ -4206,7 +3923,7 @@ void handleOtherSubmenuButtons() {
                 other_layer = OTHER_LAYER_HOME;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
-                current_submenu_index = 0;
+                current_submenu_index = other_home_selected_tile;
                 updateActiveSubmenu();
                 submenu_initialized = false;
                 displaySubmenu();
@@ -4219,7 +3936,7 @@ void handleOtherSubmenuButtons() {
                 other_layer = OTHER_LAYER_HOME;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
-                current_submenu_index = 0;
+                current_submenu_index = other_home_selected_tile;
                 updateActiveSubmenu();
                 submenu_initialized = false;
                 displaySubmenu();
@@ -4285,6 +4002,7 @@ void handleOtherSubmenuButtons() {
                 handleButtons();
                 is_main_menu = false;
             } else if (current_submenu_index == 0) {
+                other_home_selected_tile = 0;
                 other_layer = OTHER_LAYER_IR;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
@@ -4293,6 +4011,7 @@ void handleOtherSubmenuButtons() {
                 submenu_initialized = false;
                 displaySubmenu();
             } else if (current_submenu_index == 1) {
+                other_home_selected_tile = 1;
                 other_layer = OTHER_LAYER_RFID;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
@@ -4301,6 +4020,7 @@ void handleOtherSubmenuButtons() {
                 submenu_initialized = false;
                 displaySubmenu();
             } else if (current_submenu_index == 2) {
+                other_home_selected_tile = 2;
                 other_layer = OTHER_LAYER_GPS;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
@@ -4314,7 +4034,7 @@ void handleOtherSubmenuButtons() {
                 other_layer = OTHER_LAYER_HOME;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
-                current_submenu_index = 0;
+                current_submenu_index = other_home_selected_tile;
                 feature_active = false;
                 feature_exit_requested = false;
                 updateActiveSubmenu();
@@ -4331,20 +4051,9 @@ void handleOtherSubmenuButtons() {
                     current_submenu_index = 0;
                     in_sub_menu = true;
                     IRRemoteFeature::loop();
-                    if (featureExitButtonPressed()) {
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                        while (featureExitButtonPressed()) {
-                        }
-                        break;
-                    }
                 }
                 if (feature_exit_requested) {
+                    waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                     in_sub_menu = true;
                     is_main_menu = false;
                     submenu_initialized = false;
@@ -4363,20 +4072,9 @@ void handleOtherSubmenuButtons() {
                     current_submenu_index = 1;
                     in_sub_menu = true;
                     IRSavedProfile::loop();
-                    if (featureExitButtonPressed()) {
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                        while (featureExitButtonPressed()) {
-                        }
-                        break;
-                    }
                 }
                 if (feature_exit_requested) {
+                    waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                     in_sub_menu = true;
                     is_main_menu = false;
                     submenu_initialized = false;
@@ -4397,6 +4095,7 @@ void handleOtherSubmenuButtons() {
                     IRUniversalController::loop();
                 }
                 if (feature_exit_requested) {
+                    waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                     in_sub_menu = true;
                     is_main_menu = false;
                     submenu_initialized = false;
@@ -4417,6 +4116,7 @@ void handleOtherSubmenuButtons() {
                     IRUniversalAC::loop();
                 }
                 if (feature_exit_requested) {
+                    waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                     in_sub_menu = true;
                     is_main_menu = false;
                     submenu_initialized = false;
@@ -4431,7 +4131,7 @@ void handleOtherSubmenuButtons() {
                 other_layer = OTHER_LAYER_HOME;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
-                current_submenu_index = 0;
+                current_submenu_index = other_home_selected_tile;
                 updateActiveSubmenu();
                 submenu_initialized = false;
                 displaySubmenu();
@@ -4444,7 +4144,7 @@ void handleOtherSubmenuButtons() {
                 other_layer = OTHER_LAYER_HOME;
                 other_menu_grid_initialized = false;
                 last_other_menu_index = -1;
-                current_submenu_index = 0;
+                current_submenu_index = other_home_selected_tile;
                 updateActiveSubmenu();
                 submenu_initialized = false;
                 displaySubmenu();
@@ -4597,7 +4297,6 @@ void handleAboutPage() {
   is_main_menu = false;
   displayMenu();
 }
-
 void handleSettingsSubmenuButtons() {
 
   feature_active = true;
