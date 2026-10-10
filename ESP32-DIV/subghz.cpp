@@ -6,6 +6,7 @@
 #include "hwdetect.h"
 #include "icon.h"
 #include "shared.h"
+#include "Strings.h"
 
 
 namespace {
@@ -350,6 +351,53 @@ namespace {
     }
     return ok;
   }
+
+  // Rewrites one profile's name in place, mirroring deleteProfileFromFile():
+  // read the whole file, replace buf[localIndex].name, write it back. Keeps the
+  // same header/count. Re-imports if the edited file is the "current" one.
+  static bool renameProfileInFile(const String& path, uint16_t localIndex,
+                                  const char* newName, String* errOut = nullptr) {
+    if (!subghzMountSD()) { if (errOut) *errOut="SD not mounted"; return false; }
+    File f = SD.open(path.c_str(), FILE_READ);
+    if (!f) { if (errOut) *errOut="Open failed"; return false; }
+    SubGhzExportHeader h{};
+    if (!readExportHeader(f, h, errOut)) { f.close(); return false; }
+    uint16_t count = h.count; if (count > MAX_PROFILES) count = MAX_PROFILES;
+    if (localIndex >= count) { f.close(); if (errOut) *errOut="Index OOR"; return false; }
+
+    SubGhzProfile buf[MAX_PROFILES]{};
+    for (uint16_t i = 0; i < count; i++) {
+      if (f.read((uint8_t*)&buf[i], sizeof(SubGhzProfile)) != sizeof(SubGhzProfile)) { f.close(); if (errOut) *errOut="Read failed"; return false; }
+      buf[i].name[MAX_NAME_LENGTH - 1] = '\0';
+    }
+    f.close();
+
+    memset(buf[localIndex].name, 0, MAX_NAME_LENGTH);
+    strncpy(buf[localIndex].name, newName ? newName : "", MAX_NAME_LENGTH - 1);
+    buf[localIndex].name[MAX_NAME_LENGTH - 1] = '\0';
+
+    if (SD.exists(path.c_str())) SD.remove(path.c_str());
+    File w = SD.open(path.c_str(), FILE_WRITE);
+    if (!w) { if (errOut) *errOut="Open write failed"; return false; }
+
+    SubGhzExportHeader nh{};
+    nh.magic = SUBGHZ_EXPORT_MAGIC;
+    nh.version = 1;
+    nh.count = count;
+    nh.profileSize = PROFILE_SIZE;
+    nh.reserved = 0;
+    bool ok = (w.write((const uint8_t*)&nh, sizeof(nh)) == sizeof(nh));
+    for (uint16_t i = 0; ok && i < count; i++) {
+      ok = (w.write((const uint8_t*)&buf[i], sizeof(SubGhzProfile)) == sizeof(SubGhzProfile));
+    }
+    w.close();
+    if (!ok && errOut) *errOut="Write failed";
+
+    if (ok && path.endsWith("profiles_current.bin")) {
+      importProfilesFromSD(path, nullptr);
+    }
+    return ok;
+  }
 }
 
 #ifdef TFT_BLACK
@@ -396,9 +444,10 @@ static void subghzClearBody(uint16_t color = TFT_BLACK) {
 static constexpr unsigned long kSubghzNavDebounceMs = 200;
 
 static void subghzWaitNavRelease(int pin) {
-  while (isTouchNavButtonPressed(pin)) {
-    delay(10);
-  }
+  // Consume both touch and physical presses before opening another screen.
+  // In particular, a held physical RIGHT must not leak into the rename
+  // keyboard and immediately trigger one of its own actions.
+  waitButtonReleased(pin);
   delay(kSubghzNavDebounceMs);
 }
 
@@ -427,34 +476,41 @@ static bool subghzWaitWithNav(uint32_t ms) {
 }
 
 static void subghzSetReplayNavLabels() {
-  // Remapped layout: LEFT=Exit (was Freq-), SELECT=Send (the most important
-  // action, was on UP with Exit on center), UP=Freq- (was LEFT), DOWN=Freq+
-  // (was RIGHT; Freq-/Freq+ is a Prev/Next-style pair, always on UP/DOWN),
-  // RIGHT=Save (secondary, was DOWN).
-  setTouchNavLabels("Exit", "Freq+", "Send", "Freq-", "Save");
+  // Layout: LEFT=Exit, SELECT=Send, RIGHT=Save. Freq+/Freq- sit on UP/DOWN:
+  // UP raises the frequency (Freq+), DOWN lowers it (Freq-) -- matches the
+  // button direction. Labels follow the UI language (setTouchNavLabels order
+  // is left, down, center, up, right).
+  setTouchNavLabels(t(STR_NAV_EXIT), t(STR_NAV_FREQ_DOWN), t(STR_NAV_SEND),
+                    t(STR_NAV_FREQ_UP), t(STR_NAV_SAVE));
 }
 
 static void subghzSetJammerNavLabels() {
-  // Remapped layout: LEFT=Exit (was Freq-), SELECT=Toggle (the most
-  // important action, was on UP with Exit on center), UP=Freq- (was LEFT),
-  // DOWN=Freq+ (was RIGHT; Freq-/Freq+ always on UP/DOWN), RIGHT=Auto
-  // (secondary, was DOWN).
-  setTouchNavLabels("Exit", "Freq+", "Toggle", "Freq-", "Auto");
+  // Layout (setTouchNavLabels order: left, down, center, up, right):
+  // LEFT=Exit, DOWN=Freq-, SELECT=Toggle, UP=Freq+, RIGHT=Auto. Localized.
+  setTouchNavLabels(t(STR_NAV_EXIT), t(STR_NAV_FREQ_DOWN), t(STR_NAV_TOGGLE),
+                    t(STR_NAV_FREQ_UP), t(STR_NAV_AUTO));
 }
 
 static void subghzSetProfileNavLabels() {
-  // Remapped layout: LEFT=Exit (was Delete), SELECT=TX (the most important
-  // action, was RIGHT; Exit was on center), RIGHT=Delete (secondary, was
-  // LEFT). Prev/Next were already correctly on UP/DOWN.
-  setTouchNavLabels("Exit", "Next", "TX", "Prev", "Delete");
+  // Saved-profile list screen (setTouchNavLabels order: left, down, center,
+  // up, right): LEFT=Back, DOWN=Next, SELECT=TX, UP=Prev, RIGHT=View (opens
+  // the per-profile View screen). Localized.
+  setTouchNavLabels(t(STR_NAV_BACK), t(STR_NAV_NEXT), t(STR_NAV_TX),
+                    t(STR_NAV_PREV), t(STR_NAV_VIEW));
+}
+
+static void subghzSetProfileViewNavLabels() {
+  // Saved-profile View screen: LEFT=Back (to list), DOWN=Delete (confirmed),
+  // SELECT=TX, UP=(unused), RIGHT=Rename. Localized.
+  setTouchNavLabels(t(STR_NAV_BACK), t(STR_NAV_DELETE), t(STR_NAV_TX),
+                    nullptr, t(STR_NAV_RENAME));
 }
 
 static void subghzSetBruteNavLabels() {
-  // Remapped layout: LEFT=Exit (was Prev), SELECT=Go (the most important
-  // action, was on UP with Exit on center), UP=Prev (was LEFT), DOWN=Next
-  // (was RIGHT; Prev/Next always on UP/DOWN), RIGHT=Sel (secondary, was
-  // DOWN).
-  setTouchNavLabels("Exit", "Next", "Go", "Prev", "Sel");
+  // Layout (order: left, down, center, up, right): LEFT=Back, DOWN=Prev (Ant.),
+  // SELECT=Sel, UP=Next (Prox.), RIGHT=Go (Ir). Localized.
+  setTouchNavLabels(t(STR_NAV_BACK), t(STR_NAV_PREV), t(STR_NAV_SEL),
+                    t(STR_NAV_NEXT), t(STR_NAV_GO));
 }
 
 /* ── Is there actually a CC1101 on the bus? ────────────────────────────────
@@ -953,18 +1009,16 @@ void replayHandleNavButtons() {
     return;
   }
 
-  // Remapped layout: SELECT=Send (the most important action, was UP), UP=
-  // Freq- (was LEFT), DOWN=Freq+ (was RIGHT; Freq-/Freq+ always sit on
-  // UP/DOWN), RIGHT=Save (secondary, was DOWN). LEFT is the universal Exit,
-  // handled in ReplayAttackLoop(). Also switched from
-  // isTouchNavButtonPressedEdge (touch-tap only) to isButtonPressedEdge so
-  // the physical buttons actually trigger these actions too.
+  // Layout: SELECT=Send, UP=Freq+ (raise), DOWN=Freq- (lower), RIGHT=Save.
+  // LEFT is the universal Exit, handled in ReplayAttackLoop(). Uses
+  // isButtonPressedEdge (not the touch-tap-only variant) so the physical
+  // buttons trigger these actions too.
   if (isButtonPressedEdge(BTN_UP)) {
-    replayFreqPrev();
+    replayFreqNext();   // UP = Freq+ (higher frequency)
     subghzWaitNavRelease(BTN_UP);
   }
   if (isButtonPressedEdge(BTN_DOWN)) {
-    replayFreqNext();
+    replayFreqPrev();   // DOWN = Freq- (lower frequency)
     subghzWaitNavRelease(BTN_DOWN);
   }
   if (isButtonPressedEdge(BTN_SELECT)) {
@@ -1067,6 +1121,24 @@ String getUserInputName() {
 }
 
 void sendSignal() {
+
+    // Guard against transmitting an invalid capture. receivedValue/bits/proto
+    // can be stale or garbage -- notably loaded unvalidated from EEPROM on
+    // feature entry (see runUI()), or left over after a bad decode. Feeding an
+    // out-of-range protocol to RCSwitch::setProtocol() indexes past its proto[]
+    // table (OOB read -> garbage pulse length), and an absurd bit length makes
+    // RCSwitch::send() spin in delayMicroseconds() for a very long time: the
+    // device looks frozen and needs a reset. The decode path already enforces
+    // this range (replayLooksLikeRealDecode); enforce it here too so no code
+    // path can hang the transmit.
+    if (!replayLooksLikeRealDecode(receivedValue, receivedBitLength, receivedProtocol)) {
+      tft.fillRect(0, 40, 240, kReplayStatusLineY - 40, TFT_BLACK);
+      tft.setCursor(10, 30 + yshift);
+      tft.print(t(STR_REPLAY_NO_SIGNAL));
+      delay(900);
+      replayRestoreStatusPanel();
+      return;
+    }
 
     replayDisarmReceive();
     delay(100);
@@ -1415,6 +1487,15 @@ void ReplayAttackSetup() {
   EEPROM.get(ADDR_PROTO, receivedProtocol);
   EEPROM.get(ADDR_FREQ, currentFrequencyIndex);
 
+  // EEPROM may hold stale/garbage (never written, or corrupted): discard it
+  // unless it is a plausible capture, so the UI starts clean and Send can't
+  // transmit an out-of-range protocol/bit length (which would hang the radio).
+  if (!replayLooksLikeRealDecode(receivedValue, receivedBitLength, receivedProtocol)) {
+    receivedValue = 0;
+    receivedBitLength = 0;
+    receivedProtocol = 0;
+  }
+
   const uint16_t freqCount = (uint16_t)(sizeof(subghz_frequency_list) / sizeof(subghz_frequency_list[0]));
   if (currentFrequencyIndex >= freqCount) currentFrequencyIndex = 0;
 
@@ -1644,6 +1725,13 @@ void runUI();
 void transmitProfile(int index);
 void deleteProfile(int index);
 
+// Per-profile View screen (opened with RIGHT=View from the list).
+static bool viewMode = false;
+static void enterViewMode();
+static void exitViewMode();
+static void drawViewScreen();
+static void profileHandleViewButtons();
+
 static bool uiDrawn = false;
 
 #define EEPROM_SIZE 1440
@@ -1856,11 +1944,9 @@ void profileHandleNavButtons() {
     return;
   }
 
-  // Remapped layout: LEFT=Exit (was Delete), SELECT=TX (the most important
-  // action, was RIGHT; Exit was on SELECT), RIGHT=Delete (secondary, was
-  // LEFT). Prev/Next were already correctly on UP/DOWN. Also switched from
-  // isTouchNavButtonPressedEdge (touch-tap only) to isButtonPressedEdge so
-  // the physical buttons actually trigger these actions too.
+  // List screen: LEFT=Back (exit feature), UP=Prev, DOWN=Next, RIGHT=View
+  // (opens the per-profile View screen), SELECT=TX. Uses isButtonPressedEdge
+  // so physical and touch-nav buttons both work.
   if (isButtonPressedEdge(BTN_LEFT)) {
     feature_exit_requested = true;
     return;
@@ -1874,10 +1960,11 @@ void profileHandleNavButtons() {
     subghzWaitNavRelease(BTN_DOWN);
   }
   if (isButtonPressedEdge(BTN_RIGHT)) {
+    subghzWaitNavRelease(BTN_RIGHT);   // consume before switching screens
     if (sdTotalProfiles > 0) {
-      deleteProfile(currentProfileIndex);
+      enterViewMode();
     }
-    subghzWaitNavRelease(BTN_RIGHT);
+    return;
   }
   if (isButtonPressedEdge(BTN_SELECT)) {
     if (sdTotalProfiles > 0) {
@@ -2150,6 +2237,220 @@ void deleteProfile(int index) {
     updateDisplay();
 }
 
+// ───────────────────────── Per-profile View screen ─────────────────────────
+
+// Draws the dedicated View screen: one line per field, plus the delete-confirm
+// hint when a delete is armed. Does not touch the nav bar (caller sets labels).
+static void drawViewScreen() {
+  subghzClearBody(TFT_BLACK);
+
+  String err;
+  if (!selectedValid) {
+    loadSelectedFromSd(&err);
+  }
+
+  tft.setTextSize(1);
+
+  int y = 46;
+  const int step = 16;
+
+  if (!selectedValid) {
+    tft.setTextColor(UI_WARN, TFT_BLACK);
+    tft.setCursor(PROFILE_LABEL_X, y);
+    tft.print("Read failed:");
+    tft.setCursor(PROFILE_VALUE_X, y);
+    tft.print(err);
+    return;
+  }
+
+  // Header: the profile name in accent color.
+  tft.setTextColor(UI_ICON, TFT_BLACK);
+  tft.setCursor(PROFILE_LABEL_X, y);
+  tft.print(selectedProfile.name);
+  y += step + 4;
+
+  tft.setTextColor(UI_TEXT, TFT_BLACK);
+  tft.setCursor(PROFILE_LABEL_X, y);
+  tft.print("Freq:");
+  tft.setCursor(PROFILE_VALUE_X, y);
+  tft.printf("%.2f MHz", selectedProfile.frequency / 1000000.0);
+  y += step;
+
+  tft.setCursor(PROFILE_LABEL_X, y);
+  tft.print("Protocol:");
+  tft.setCursor(PROFILE_VALUE_X + 20, y);
+  tft.print(selectedProfile.protocol);
+  y += step;
+
+  tft.setCursor(PROFILE_LABEL_X, y);
+  tft.print("Value:");
+  tft.setCursor(PROFILE_VALUE_X, y);
+  tft.print((unsigned long)selectedProfile.value);
+  y += step;
+
+  tft.setCursor(PROFILE_LABEL_X, y);
+  tft.print("Bits:");
+  tft.setCursor(PROFILE_VALUE_X, y);
+  tft.print(selectedProfile.bitLength);
+  y += step;
+
+  tft.setTextColor(UI_DIM_TEXT, TFT_BLACK);
+  tft.setCursor(PROFILE_LABEL_X, y);
+  tft.print("Source:");
+  tft.setCursor(PROFILE_VALUE_X, y);
+  if (selectedPath.endsWith("profiles_current.bin")) {
+    tft.print("current");
+  } else {
+    const int slash = selectedPath.lastIndexOf('/');
+    tft.print(slash >= 0 ? selectedPath.substring(slash + 1) : selectedPath);
+  }
+  y += step + 6;
+
+  if (deleteArmed && (int32_t)(millis() - deleteArmUntilMs) < 0) {
+    tft.setTextColor(UI_WARN, TFT_BLACK);
+    tft.setCursor(PROFILE_LABEL_X, y);
+    tft.print(t(STR_PROFILE_DELETE_CONFIRM));
+  }
+}
+
+static void enterViewMode() {
+  if (sdTotalProfiles == 0) return;
+  selectedValid = false;
+  String err;
+  loadSelectedFromSd(&err);
+  if (!selectedValid) return;          // nothing valid to view
+  viewMode = true;
+  deleteArmed = false;
+  subghzSetProfileViewNavLabels();
+  drawViewScreen();
+  subghzRedrawNavChrome();
+}
+
+static void exitViewMode() {
+  viewMode = false;
+  deleteArmed = false;
+  subghzSetProfileNavLabels();
+  subghzClearBody(TFT_BLACK);
+  uiDrawn = false;
+  updateDisplay();
+  runUI();
+  subghzRedrawNavChrome();
+}
+
+static void renameSelectedProfile() {
+  String err;
+  if (!selectedValid) {
+    loadSelectedFromSd(&err);
+    if (!selectedValid) return;
+  }
+  String path = selectedPath;
+  uint16_t local = selectedLocalIdx;
+
+  OnScreenKeyboardConfig cfg;
+  cfg.titleLine1      = "[!] Rename profile";
+  cfg.titleLine2      = "(max 15 chars, ^ caps, # sym)";
+  osKeyboardUseStandardLayout(cfg);
+  cfg.maxLen          = MAX_NAME_LENGTH - 1;
+  cfg.buttonsY        = 195;
+  cfg.backLabel       = "Back";
+  cfg.okLabel         = "OK";
+  cfg.enableShuffle   = false;
+  cfg.requireNonEmpty = true;
+  cfg.emptyErrorMsg   = "Name cannot be empty!";
+
+  // The View footer uses RIGHT=Rename, while the keyboard uses RIGHT as
+  // backspace. Disable the touch-nav overlay while the keyboard is open so
+  // its stale footer slots cannot generate keyboard button events.
+  setTouchButtonInputEnabled(false);
+  OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, String(selectedProfile.name));
+  setTouchButtonInputEnabled(true);
+
+  if (r.accepted && r.text.length() > 0) {
+    if (renameProfileInFile(path, local, r.text.c_str(), &err)) {
+      refreshSdIndex(true);
+      selectedValid = false;
+      cacheDirty = true;
+      loadSelectedFromSd(&err);
+    }
+  }
+
+  // The keyboard painted over the whole screen: rebuild the View screen.
+  subghzSetProfileViewNavLabels();
+  drawViewScreen();
+  subghzRedrawNavChrome();
+}
+
+// DOWN on the View screen: two-press confirmed delete, then return to the list.
+static void viewDeleteSelected() {
+  uint32_t now = millis();
+  if (!deleteArmed || (int32_t)(now - deleteArmUntilMs) >= 0) {
+    deleteArmed = true;
+    deleteArmUntilMs = now + 3000;
+    drawViewScreen();                  // shows the confirm hint
+    return;
+  }
+  deleteArmed = false;
+
+  String err;
+  if (!selectedValid) {
+    loadSelectedFromSd(&err);
+    if (!selectedValid) { exitViewMode(); return; }
+  }
+  String path = selectedPath;
+  uint16_t local = selectedLocalIdx;
+
+  if (deleteProfileFromFile(path, local, &err)) {
+    refreshSdIndex(false);
+    if (sdTotalProfiles == 0) currentProfileIndex = 0;
+    else if (currentProfileIndex >= sdTotalProfiles) currentProfileIndex = (uint16_t)(sdTotalProfiles - 1);
+    selectedValid = false;
+    cacheDirty = true;
+  } else {
+    profileClearContentArea(TFT_BLACK);
+    tft.setCursor(10, 30 + yshift);
+    tft.setTextColor(UI_WARN);
+    tft.print("Delete FAILED");
+    tft.setCursor(10, 45 + yshift);
+    tft.setTextColor(TFT_WHITE);
+    tft.print(err);
+    delay(1200);
+  }
+
+  exitViewMode();                      // list reflects the removal
+}
+
+static void profileHandleViewButtons() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  // View screen: LEFT=Back, SELECT=TX, RIGHT=Rename, DOWN=Delete (confirmed).
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    subghzWaitNavRelease(BTN_LEFT);
+    exitViewMode();
+    return;
+  }
+  if (isButtonPressedEdge(BTN_SELECT)) {
+    subghzWaitNavRelease(BTN_SELECT);
+    transmitProfile(currentProfileIndex);   // restores the list chrome...
+    if (viewMode) {                          // ...so repaint the View screen
+      subghzSetProfileViewNavLabels();
+      drawViewScreen();
+      subghzRedrawNavChrome();
+    }
+    return;
+  }
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    subghzWaitNavRelease(BTN_RIGHT);
+    renameSelectedProfile();
+    return;
+  }
+  if (isButtonPressedEdge(BTN_DOWN)) {
+    subghzWaitNavRelease(BTN_DOWN);
+    viewDeleteSelected();
+    return;
+  }
+}
+
 void runUI() {
     #define STATUS_BAR_Y_OFFSET 20
     #define STATUS_BAR_HEIGHT 16
@@ -2301,6 +2602,7 @@ void saveSetup() {
     refreshSdIndex(false);
     cacheDirty = true;
     deleteArmed = false;
+    viewMode = false;
     updateDisplay();
     uiDrawn = false;
     runUI();
@@ -2309,18 +2611,27 @@ void saveSetup() {
 
 void saveLoop() {
 
-    // Remapped layout: LEFT exits now (was SELECT).
-    if (feature_active && (feature_exit_requested || isButtonPressed(BTN_LEFT))) {
+    // LEFT exits the feature -- but only from the list. On the View screen LEFT
+    // means "back to list" (handled in profileHandleViewButtons), so it must
+    // not leak through to here as a feature exit.
+    if (feature_active && (feature_exit_requested ||
+                           (!viewMode && isButtonPressed(BTN_LEFT)))) {
         feature_exit_requested = true;
         return;
     }
 
     maintainTouchNavBar();
+
+    if (viewMode) {
+        // View screen is static chrome; no list icon animation/touch here.
+        profileHandleViewButtons();
+        return;
+    }
+
     runUI();
-    // profileHandleNavButtons() now reads isButtonPressedEdge() (physical OR
-    // touch-nav, see its own comment), which made the raw
-    // isPhysicalButtonPressed() block that used to live here (and
-    // duplicated/conflicted with it) redundant -- removed.
+    // profileHandleNavButtons() reads isButtonPressedEdge() (physical OR
+    // touch-nav), so the raw isPhysicalButtonPressed() block that used to live
+    // here was redundant and was removed.
     profileHandleNavButtons();
 }
 
@@ -2461,22 +2772,21 @@ void subjammerHandleNavButtons() {
     return;
   }
 
-  // Remapped layout: SELECT=Toggle (the most important action, was UP),
-  // UP=Freq- (was LEFT), DOWN=Freq+ (was RIGHT; Freq-/Freq+ always sit on
-  // UP/DOWN), RIGHT=Auto (secondary, was DOWN). LEFT is the universal Exit.
-  // Also switched from isTouchNavButtonPressedEdge (touch-tap only) to
-  // isButtonPressedEdge so the physical buttons actually trigger these
-  // actions too.
+  // Layout: SELECT=Toggle, UP=Freq+ (raise), DOWN=Freq- (lower), RIGHT=Auto.
+  // LEFT is the universal Exit, handled in subjammerLoop(). This is the single
+  // input path for the jammer -- the old duplicate physical-button block in
+  // subjammerLoop() was removed because it mapped the same buttons to
+  // different actions (that is why LEFT/RIGHT both appeared to toggle Auto).
   if (isButtonPressedEdge(BTN_SELECT)) {
     subjammerToggleJam();
     subghzWaitNavRelease(BTN_SELECT);
   }
   if (isButtonPressedEdge(BTN_UP)) {
-    subjammerFreqPrev();
+    subjammerFreqNext();   // UP = Freq+
     subghzWaitNavRelease(BTN_UP);
   }
   if (isButtonPressedEdge(BTN_DOWN)) {
-    subjammerFreqNext();
+    subjammerFreqPrev();   // DOWN = Freq-
     subghzWaitNavRelease(BTN_DOWN);
   }
   if (isButtonPressedEdge(BTN_RIGHT)) {
@@ -2813,35 +3123,7 @@ void subjammerLoop() {
       }
     }
     jammerPollBlinkIndicator();
-    subjammerHandleNavButtons();
-
-#if HAS_PCF8574_BUTTONS
-    int btnLeftState = pcf.digitalRead(JAM_BTN_LEFT);
-    int btnRightState = pcf.digitalRead(JAM_BTN_RIGHT);
-    int btnUpState = pcf.digitalRead(JAM_BTN_UP);
-    int btnDownState = pcf.digitalRead(JAM_BTN_DOWN);
-#else
-    int btnLeftState = isPhysicalButtonPressed(BTN_LEFT) ? LOW : HIGH;
-    int btnRightState = isPhysicalButtonPressed(BTN_RIGHT) ? LOW : HIGH;
-    int btnUpState = isPhysicalButtonPressed(BTN_UP) ? LOW : HIGH;
-    int btnDownState = isPhysicalButtonPressed(BTN_DOWN) ? LOW : HIGH;
-#endif
-
-    if (btnUpState == LOW && millis() - lastDebounceTime > debounceDelay) {
-        subjammerToggleJam();
-    }
-
-    if (btnRightState == LOW && !autoMode && millis() - lastDebounceTime > debounceDelay) {
-        subjammerFreqNext();
-    }
-
-    if (btnLeftState == LOW && !autoMode && millis() - lastDebounceTime > debounceDelay) {
-        subjammerFreqPrev();
-    }
-
-    if (btnDownState == LOW && millis() - lastDebounceTime > debounceDelay) {
-        subjammerToggleAuto();
-    }
+    subjammerHandleNavButtons();   // the single input path (see its comment)
 
     subjammerAutoSweepIfDue();
 
@@ -3063,18 +3345,18 @@ static bool bruteShouldAbort() {
     return true;
   }
   maintainTouchNavBar();
-  if (isTouchNavButtonPressedEdge(BTN_UP)) {
+  if (isTouchNavButtonPressedEdge(BTN_RIGHT)) {
     s_stopRequested = true;
     return true;
   }
-  static bool prevPhysUp = false;
-  const bool physUp = isPhysicalButtonPressed(BTN_UP);
-  if (physUp && !prevPhysUp) {
-    prevPhysUp = physUp;
+  static bool prevPhysRight = false;
+  const bool physRight = isPhysicalButtonPressed(BTN_RIGHT);
+  if (physRight && !prevPhysRight) {
+    prevPhysRight = physRight;
     s_stopRequested = true;
     return true;
   }
-  prevPhysUp = physUp;
+  prevPhysRight = physRight;
 
   int x, y;
   if (readTouchXY(x, y)) {
@@ -3089,12 +3371,12 @@ static bool bruteShouldAbort() {
 
 static void bruteWaitGoRelease() {
   const uint32_t t0 = millis();
-  while ((isTouchNavButtonPressed(BTN_UP) || isPhysicalButtonPressed(BTN_UP)) &&
+  while ((isTouchNavButtonPressed(BTN_RIGHT) || isPhysicalButtonPressed(BTN_RIGHT)) &&
          (millis() - t0) < 800) {
     delay(5);
   }
   delay(30);
-  (void)isTouchNavButtonPressedEdge(BTN_UP);
+  (void)isTouchNavButtonPressedEdge(BTN_RIGHT);
 }
 
 static void drawPanelFrame(int y, int h, const char* title) {
@@ -3496,27 +3778,26 @@ void bruteHandleNavButtons() {
   if (!featureHasTouchNavBar()) {
     return;
   }
-  // Remapped layout: SELECT=Go/Stop (the most important action, was UP),
-  // UP=Prev value (was LEFT), DOWN=Next value (was RIGHT; Prev/Next always
-  // sit on UP/DOWN), RIGHT=Sel/cycle focus (secondary, was DOWN). LEFT is
-  // the universal Exit. Also switched from isTouchNavButtonPressedEdge
-  // (touch-tap only) to isButtonPressedEdge so the physical buttons
-  // actually trigger these actions too.
+  // Layout: UP=Next (Prox.), DOWN=Prev (Ant.), SELECT=Sel (cycle focus),
+  // RIGHT=Go (Ir, start/stop), LEFT=Back (handled in subBruteLoop). This is
+  // the single input path -- the old duplicate physical-button block in
+  // subBruteLoop() was removed because it mapped the same buttons to other
+  // actions.
   if (isButtonPressedEdge(BTN_UP)) {
-    adjustFocused(-1);
+    adjustFocused(+1);   // Next
     subghzWaitNavRelease(BTN_UP);
   }
   if (isButtonPressedEdge(BTN_DOWN)) {
-    adjustFocused(+1);
+    adjustFocused(-1);   // Prev
     subghzWaitNavRelease(BTN_DOWN);
   }
-  if (isButtonPressedEdge(BTN_RIGHT)) {
-    cycleFocus();
-    subghzWaitNavRelease(BTN_RIGHT);
-  }
   if (isButtonPressedEdge(BTN_SELECT)) {
-    startOrStop();
+    cycleFocus();        // Sel
     subghzWaitNavRelease(BTN_SELECT);
+  }
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    startOrStop();       // Go
+    subghzWaitNavRelease(BTN_RIGHT);
   }
 }
 
@@ -3696,32 +3977,7 @@ void subBruteLoop() {
     tft.drawFastHLine(0, 19, 240, UI_LINE);
     tft.drawFastHLine(0, kBarBottom, 240, UI_LINE);
   }
-  bruteHandleNavButtons();
-
-#if HAS_PCF8574_BUTTONS
-  const int btnLeftState = pcf.digitalRead(BTN_LEFT);
-  const int btnRightState = pcf.digitalRead(BTN_RIGHT);
-  const int btnUpState = pcf.digitalRead(BTN_UP);
-  const int btnDownState = pcf.digitalRead(BTN_DOWN);
-#else
-  const int btnLeftState = isPhysicalButtonPressed(BTN_LEFT) ? LOW : HIGH;
-  const int btnRightState = isPhysicalButtonPressed(BTN_RIGHT) ? LOW : HIGH;
-  const int btnUpState = isPhysicalButtonPressed(BTN_UP) ? LOW : HIGH;
-  const int btnDownState = isPhysicalButtonPressed(BTN_DOWN) ? LOW : HIGH;
-#endif
-
-  if (btnLeftState == LOW && millis() - s_lastDebounce > kDebounceMs) {
-    adjustFocused(-1);
-  }
-  if (btnRightState == LOW && millis() - s_lastDebounce > kDebounceMs) {
-    adjustFocused(+1);
-  }
-  if (btnDownState == LOW && millis() - s_lastDebounce > kDebounceMs) {
-    cycleFocus();
-  }
-  if (btnUpState == LOW && millis() - s_lastDebounce > kDebounceMs) {
-    startOrStop();
-  }
+  bruteHandleNavButtons();   // the single input path (see its comment)
 }
 
 }  // namespace SubBrute
@@ -4231,17 +4487,15 @@ static bool edge(int pin, bool& prev) {
 }
 
 static void handleInput() {
-  // Remapped layout: SELECT=Log (the most important action, was DOWN; Exit
-  // was on SELECT), UP=Freq- (was LEFT), DOWN=Freq+ (was RIGHT; Freq-/Freq+
-  // is a Prev/Next-style pair, always on UP/DOWN), RIGHT=Reset (secondary,
-  // was UP). LEFT is the universal Exit, handled in Loop().
-  const bool navFreqDown = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_UP);
-  const bool navFreqUp = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_DOWN);
+  // Layout: SELECT=Log, UP=Freq+, DOWN=Freq-, RIGHT=Reset.
+  // LEFT is the universal Exit, handled in Loop().
+  const bool navFreqUp = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_UP);
+  const bool navFreqDown = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_DOWN);
   const bool navReset = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_RIGHT);
   const bool navLog = featureHasTouchNavBar() && isTouchNavButtonPressedEdge(BTN_SELECT);
 
-  if (edge(BTN_UP, prevUp) || navFreqDown) tuneTo(freqIdx + kFreqCount - 1);
-  if (edge(BTN_DOWN, prevDown) || navFreqUp) tuneTo(freqIdx + 1);
+  if (edge(BTN_UP, prevUp) || navFreqUp) tuneTo(freqIdx + 1);
+  if (edge(BTN_DOWN, prevDown) || navFreqDown) tuneTo(freqIdx + kFreqCount - 1);
   if (edge(BTN_RIGHT, prevRight) || navReset) {
     jdResetStats();
   }
@@ -4258,11 +4512,9 @@ static void exitCleanup() {
 
 void Setup() {
   setTouchButtonInputEnabled(true);
-  // Remapped layout: LEFT=Exit (was Freq-), SELECT=Log (the most important
-  // action, was on DOWN with Exit on center), UP=Freq- (was LEFT), DOWN=
-  // Freq+ (was RIGHT; Freq-/Freq+ always on UP/DOWN), RIGHT=Reset
-  // (secondary, was UP).
-  setTouchNavLabels("Exit", "Freq+", "Log", "Freq-", "Reset");
+  // Layout order: LEFT=Exit, DOWN=Freq-, SELECT=Log, UP=Freq+, RIGHT=Reset.
+  setTouchNavLabels(t(STR_NAV_EXIT), t(STR_NAV_FREQ_DOWN), t(STR_NAV_LOG),
+                    t(STR_NAV_FREQ_UP), t(STR_NAV_RESET));
 
   holdSdInactiveOnSharedSpi();
   reclaimSharedSpiBus();

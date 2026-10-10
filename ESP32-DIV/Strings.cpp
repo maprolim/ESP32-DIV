@@ -47,9 +47,10 @@ const LocStr STRINGS[STR_KEY_COUNT] = {
     {"Dark", "Escuro", "Oscuro"},                                 // STR_SETTINGS_THEME_DARK
     {"Light", "Claro", "Claro"},                                  // STR_SETTINGS_THEME_LIGHT
 
-    // Every on/off switch row's value label
-    {"ON", "LIGADO", "ENCENDIDO"},                                // STR_SETTINGS_ON
-    {"OFF", "DESLIGADO", "APAGADO"},                              // STR_SETTINGS_OFF
+    // Every on/off switch row's value label (mixed case so PT/ES fit
+    // beside the toggle; EN stays ON/OFF to match the original styling)
+    {"ON", "Ligado", "Encendido"},                                // STR_SETTINGS_ON
+    {"OFF", "Desligado", "Apagado"},                              // STR_SETTINGS_OFF
 
     // Settings > Accent row's color names
     {"Orange", "Laranja", "Naranja"},                             // STR_ACCENT_ORANGE
@@ -107,7 +108,7 @@ const LocStr STRINGS[STR_KEY_COUNT] = {
     {"SubGHz Jammer", "Bloqueador SubGHz", "Bloqueador SubGHz"},               // STR_SUBGHZ_JAMMER
     {"De Bruijn / Brute", "De Bruijn / Forca Bruta", "De Bruijn / Fuerza Bruta"}, // STR_SUBGHZ_DE_BRUIJN_BRUTE
     {"Jamming Detector", "Detector de Interferencia", "Detector de Interferencia"}, // STR_SUBGHZ_JAMMING_DETECTOR
-    {"Saved Profile", "Perfil Salvo", "Perfil Guardado"},                      // STR_SUBGHZ_SAVED_PROFILE
+    {"Saved Profiles", "Perfis Salvos", "Perfiles Guardados"},                 // STR_SUBGHZ_SAVED_PROFILE
 
     // Tools features
     {"Serial Monitor", "Monitor Serial", "Monitor Serie"},                     // STR_TOOLS_SERIAL_MONITOR
@@ -134,6 +135,36 @@ const LocStr STRINGS[STR_KEY_COUNT] = {
     {"Saved Profile", "Perfil Salvo", "Perfil Guardado"},                     // STR_IR_SAVED_PROFILE
     {"Universal Controller", "Controle Universal", "Control Universal"},     // STR_IR_UNIVERSAL_CONTROLLER
     {"Universal Controller A/C", "Controle Universal A/C", "Control Universal A/C"}, // STR_IR_UNIVERSAL_CONTROLLER_AC
+
+    // Settings > Language picker footer hint (two lines, kept short to fit 240px)
+    {"UP/DOWN: move   SELECT: apply", "UP/DOWN: mover   SELECT: aplicar", "UP/DOWN: mover   SELECT: aplicar"}, // STR_LANG_PICKER_HINT1
+    {"LEFT: cancel", "LEFT: cancelar", "LEFT: cancelar"},        // STR_LANG_PICKER_HINT2
+
+    // SubGHz > Replay Attack nav-bar labels
+    {"Exit", "Sair", "Salir"},                                   // STR_NAV_EXIT
+    {"Send", "Enviar", "Enviar"},                                // STR_NAV_SEND
+    {"Save", "Salvar", "Guardar"},                               // STR_NAV_SAVE
+    {"Freq+", "Freq+", "Freq+"},                                 // STR_NAV_FREQ_UP
+    {"Freq-", "Freq-", "Freq-"},                                 // STR_NAV_FREQ_DOWN
+    {"No valid signal", "Nenhum sinal valido", "Ninguna senal valida"}, // STR_REPLAY_NO_SIGNAL
+
+    // More SubGHz nav-bar labels (short to fit 48px cells)
+    {"Back", "Voltar", "Volver"},                                // STR_NAV_BACK
+    {"On/Off", "On/Off", "On/Off"},                              // STR_NAV_TOGGLE
+    {"Auto", "Auto", "Auto"},                                    // STR_NAV_AUTO
+    {"Next", "Prox.", "Sig."},                                   // STR_NAV_NEXT
+    {"Prev", "Ant.", "Ant."},                                    // STR_NAV_PREV
+    {"TX", "TX", "TX"},                                          // STR_NAV_TX
+    {"Delete", "Apagar", "Borrar"},                              // STR_NAV_DELETE
+    {"View", "Ver", "Ver"},                                      // STR_NAV_VIEW
+    {"Go", "Ir", "Ir"},                                          // STR_NAV_GO
+    {"Sel", "Sel", "Sel"},                                       // STR_NAV_SEL
+    {"Log", "Log", "Log"},                                       // STR_NAV_LOG
+    {"Reset", "Zerar", "Reset"},                                 // STR_NAV_RESET
+    {"Rename", "Renom.", "Renom."},                              // STR_NAV_RENAME
+
+    // Saved-profile View screen delete confirmation (body text)
+    {"Press Delete again to confirm", "Aperte Apagar de novo p/ confirmar", "Pulsa Borrar de nuevo p/ confirmar"}, // STR_PROFILE_DELETE_CONFIRM
 };
 
 const char* t(StrKey key) {

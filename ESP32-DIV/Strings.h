@@ -63,7 +63,8 @@ enum StrKey : uint16_t {
   STR_SETTINGS_THEME_LIGHT,
 
   // Every on/off switch row's value label (drawSwitchWidgetRow()) -- NeoPixel,
-  // Auto Scan. Kept upper-case to match the original "ON"/"OFF" styling.
+  // Auto Scan. EN keeps ON/OFF; PT/ES use mixed case so the longer words
+  // fit to the left of the toggle without covering it.
   STR_SETTINGS_ON,
   STR_SETTINGS_OFF,
 
@@ -151,6 +152,40 @@ enum StrKey : uint16_t {
   STR_IR_SAVED_PROFILE,
   STR_IR_UNIVERSAL_CONTROLLER,
   STR_IR_UNIVERSAL_CONTROLLER_AC,
+
+  // Settings > Language picker footer hint (drawLangPicker() in utils.cpp),
+  // split into two short lines so it fits the 240px width in every language.
+  STR_LANG_PICKER_HINT1,
+  STR_LANG_PICKER_HINT2,
+
+  // SubGHz > Replay Attack touch/nav footer labels (subghz.cpp). Kept short
+  // to fit the nav-bar cells. Freq+/Freq- keep the +/- symbols in every
+  // language since those read universally.
+  STR_NAV_EXIT,
+  STR_NAV_SEND,
+  STR_NAV_SAVE,
+  STR_NAV_FREQ_UP,
+  STR_NAV_FREQ_DOWN,
+  STR_REPLAY_NO_SIGNAL,
+
+  // More SubGHz nav-bar labels (subghz.cpp). Kept to ~6 chars so they fit the
+  // 48px nav cells in every language.
+  STR_NAV_BACK,
+  STR_NAV_TOGGLE,
+  STR_NAV_AUTO,
+  STR_NAV_NEXT,
+  STR_NAV_PREV,
+  STR_NAV_TX,
+  STR_NAV_DELETE,
+  STR_NAV_VIEW,
+  STR_NAV_GO,
+  STR_NAV_SEL,
+  STR_NAV_LOG,
+  STR_NAV_RESET,
+  STR_NAV_RENAME,
+
+  // Saved-profile View screen: delete confirmation line (body text, full width)
+  STR_PROFILE_DELETE_CONFIRM,
 
   STR_KEY_COUNT
 };
