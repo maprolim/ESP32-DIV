@@ -13,6 +13,7 @@
 #include "shared.h"
 #include "utils.h"
 #include "Strings.h"
+#include "LangInfo.h"
 
 bool notificationVisible = false;
 static bool notificationHasSave = false;
@@ -1854,6 +1855,18 @@ static int  langPickerSel = 0;
 
 static Rect rowRect(int i) { return makeRect(PAD_X, rowY(i), SCREEN_W - PAD_X*2, ROW_H); }
 
+// Side bar marking the focused row. Hover uses the user's accent (UI_ICON)
+// instead of UI.accent (0x3166, nearly the same gray as the card), which was
+// hard to see on the TFT. Editing keeps green and is wider, so the two states
+// stay distinct. Both stay well under PAD_X so they never touch the label.
+static const int SEL_BAR_W_HOVER = 4;
+static const int SEL_BAR_W_EDIT  = 7;
+
+static void drawSelBar(int y, int h, bool isEditing) {
+  if (isEditing) tft.fillRect(0, y, SEL_BAR_W_EDIT, h, UI.ok);
+  else           tft.fillRect(0, y, SEL_BAR_W_HOVER, h, UI_ICON);
+}
+
 static void setTitleFont() { tft.setTextFont(2); }
 static void setLabelFont() { tft.setTextFont(2); }
 
@@ -1867,13 +1880,11 @@ static void drawTitle() {
 static void drawCardStatic(int i, bool selected) {
   Rect r = rowRect(i);
 
+  // Full-width wipe first: clears whichever bar (hover or the wider edit one)
+  // was drawn here before, so leaving a row or leaving edit mode leaves no trail.
   tft.fillRect(0, r.y, SCREEN_W, r.h, UI_BG);
 
-  if (selected) {
-    const uint16_t barColor = editing ? UI.ok : UI.accent;  // verde = em edicao
-    const int barW = editing ? 6 : 3;
-    tft.fillRect(0, r.y, barW, r.h, barColor);
-  }
+  if (selected) drawSelBar(r.y, r.h, editing);  // verde = em edicao
 
   setLabelFont();
   tft.setTextColor(textDim, UI_BG);
@@ -1928,8 +1939,12 @@ static void drawBrightnessWidget(uint8_t v, bool selected) {
   tft.fillRoundRect(tr.x, tr.y, fw+2, tr.h, tr.h/2, UI_ICON);
 
   Rect kb = rBrightKnob(v);
+  // Knob border: orange (accent) only while this row is being edited;
+  // otherwise gray (cardEdge), the same border as the track and value box,
+  // whether or not the cursor is just hovering here.
+  const uint16_t knobEdge = (selected && editing) ? UI_ICON : cardEdge;
   tft.fillCircle(kb.x + kb.w/2, kb.y + kb.h/2, kb.w/2, UI_FG);
-  tft.drawCircle(kb.x + kb.w/2, kb.y + kb.h/2, kb.w/2, selected ? UI_ICON : UI_FG);
+  tft.drawCircle(kb.x + kb.w/2, kb.y + kb.h/2, kb.w/2, knobEdge);
 
   int bx = tr.x + tr.w + 6, by = tr.y - 2, bw = 34, bh = tr.h + 4;
   tft.fillRoundRect(bx+1, by+1, bw, bh, 4, blend565(UI_BG, UI_FG, 28));
@@ -2129,12 +2144,17 @@ static void drawSwitchWidgetRow(bool on, bool , int row) {
   tft.fillCircle(kb.x+kb.w/2, kb.y+kb.h/2, kb.w/2, knobBody);
   tft.drawCircle(kb.x+kb.w/2, kb.y+kb.h/2, kb.w/2, knobEdge);
 
+  // Right-align the value against the toggle. A fixed 26px slot was
+  // enough for EN "ON"/"OFF" and overflowed onto the knob in PT/ES.
   setLabelFont();
   tft.setTextColor(textStrong, UI_BG);
-  int labelX = tr.x - 26;
-  int labelY = tr.y + 1;
+  const char* label = on ? t(STR_SETTINGS_ON) : t(STR_SETTINGS_OFF);
+  const int gap = 6;
+  Rect rr = rowRect(row);
+  int labelX = tr.x - gap - (int)tft.textWidth(label);
+  int labelY = rr.y + (rr.h / 2 - 6);
   tft.setCursor(labelX, labelY);
-  tft.print(on ? t(STR_SETTINGS_ON) : t(STR_SETTINGS_OFF));
+  tft.print(label);
 
   tft.endWrite();
 }
@@ -2463,6 +2483,79 @@ static void handleTouch() {
   }
 }
 
+static void waitReleaseBtn(int pin);  // definida mais abaixo
+
+// Word-wraps `text` into the box, same algorithm as drawWrappedParagraph() in
+// ESP32-DIV.ino (which is static there, so we keep a local copy here).
+static void drawInfoParagraph(int x, int y, int maxWidth, int maxY, const char* text) {
+  String msg = text ? String(text) : String("");
+  msg.trim();
+  const int lineH = 13;
+  while (msg.length() > 0 && y <= maxY) {
+    int lineEnd = msg.length();
+    while (lineEnd > 0 && tft.textWidth(msg.substring(0, lineEnd)) > maxWidth) lineEnd--;
+    if (lineEnd <= 0) break;
+    if (lineEnd < (int)msg.length()) {
+      int lastSpace = msg.substring(0, lineEnd).lastIndexOf(' ');
+      if (lastSpace > 0) lineEnd = lastSpace;
+    }
+    tft.setCursor(x, y);
+    tft.print(msg.substring(0, lineEnd));
+    msg = msg.substring(lineEnd);
+    msg.trim();
+    y += lineH;
+  }
+}
+
+// Full-screen explanation for the Settings row `idx` (BTN_RIGHT opens it),
+// in the current UI language. Mirrors drawFeatureInfoScreen() used by the
+// other menus. BTN_LEFT returns to the Settings list.
+static void showSettingsInfo(int idx) {
+  if (idx < 0 || idx >= N) return;
+
+  tft.fillScreen(UI_BG);
+  currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+
+  const uint8_t lang = settings().infoLang;
+  const int xPad = 14;
+  const int maxWidth = tft.width() - 2 * xPad;
+  const int maxY = tft.height() - 12;
+  int y = 32;
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(2);
+  tft.setTextColor(UI_ICON, UI_BG);
+  tft.setCursor(xPad, y);
+  tft.print(t(itemKeys[idx]));
+  y += 20;
+
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DIM_TEXT, UI_BG);
+  tft.setCursor(xPad, y);
+  tft.print("< voltar");
+  y += 12;
+
+  tft.drawFastHLine(xPad - 2, y, tft.width() - 2 * (xPad - 2), UI_LINE);
+  y += 8;
+
+  tft.setTextColor(UI_ICON, UI_BG);
+  tft.setCursor(xPad, y);
+  tft.print(INFO_LANG_NAMES[lang < INFO_LANG_COUNT ? lang : INFO_LANG_EN]);
+  tft.print(":");
+  y += 13;
+
+  tft.setTextColor(UI_TEXT, UI_BG);
+  drawInfoParagraph(xPad, y, maxWidth, maxY, infoLangText(settings_info[idx], lang));
+
+  // Modal, like the feature info screens: block until LEFT, then the caller
+  // redraws the Settings list fresh (no cursor leftovers).
+  waitReleaseBtn(BTN_RIGHT);          // consume the press that opened this
+  while (!isButtonPressed(BTN_LEFT)) delay(10);
+  waitReleaseBtn(BTN_LEFT);
+}
+
 // Redesenha apenas a linha selecionada (reflete a barra de "editando").
 static void drawSelRow() {
   auto& s = settings();
@@ -2528,9 +2621,7 @@ static void drawLangPicker() {
     const bool active = (i == settings().infoLang);
 
     tft.fillRect(0, r.y, SCREEN_W, r.h, UI_BG);
-    if (cursor) {
-      tft.fillRect(0, r.y, 3, r.h, UI.accent);
-    }
+    if (cursor) drawSelBar(r.y, r.h, false);
 
     setLabelFont();
     tft.setTextColor(textStrong, UI_BG);
@@ -2548,11 +2639,15 @@ static void drawLangPicker() {
     tft.drawLine(PAD_X, r.y + r.h - 1, SCREEN_W - PAD_X, r.y + r.h - 1, UI_LINE);
   }
 
+  // Footer hint: localized (follows the UI language) and split across two
+  // lines so it fits the 240px width instead of wrapping messily.
   tft.setTextFont(1);
   tft.setTextSize(1);
   tft.setTextColor(UI_DIM_TEXT, UI_BG);
-  tft.setCursor(PAD_X, tft.height() - 16);
-  tft.print("UP/DOWN escolhe   SELECT confirma   LEFT cancela");
+  tft.setCursor(PAD_X, tft.height() - 28);
+  tft.print(t(STR_LANG_PICKER_HINT1));
+  tft.setCursor(PAD_X, tft.height() - 14);
+  tft.print(t(STR_LANG_PICKER_HINT2));
 }
 
 void setup(){
@@ -2724,7 +2819,16 @@ void loop(){
     if (dirtySettings) { saveSel = 1; saveDialog = true; drawSaveDialog(); }  // mudou algo -> pergunta
     else { waitReleaseBtn(BTN_LEFT); feature_exit_requested = true; }         // nada mudou -> volta
   }
-  // ">" em navegacao: nao faz nada (so edita apos apertar o meio)
+  // ">" em navegacao: abre a tela de informacao da opcao atual.
+  if (rightNow && !rightWasDown && (now - lastActionMs > ACTION_DEBOUNCE_MS)) {
+    lastActionMs = now;
+    showSettingsInfo(sel);     // modal: so volta no BTN_LEFT
+    drawAll();                 // redesenha tudo (sem restos do cursor)
+    last_sel = sel;
+    upWasDown=upNow; downWasDown=downNow; leftWasDown=leftNow; rightWasDown=rightNow; selectWasDown=selectNow;
+    delay(2);
+    return;
+  }
 
   upWasDown=upNow; downWasDown=downNow; leftWasDown=leftNow; rightWasDown=rightNow; selectWasDown=selectNow;
 

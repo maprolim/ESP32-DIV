@@ -23,3 +23,8 @@ extern const InfoText tools_info[4];
 extern const InfoText rfid_info[8];
 extern const InfoText gps_info[2];
 extern const InfoText ir_info[4];
+
+// Order matches itemKeys[] in utils.cpp's AppSettingsUI namespace:
+// Brightness, Theme, Accent, NeoPixel, Auto Scan, Language. Opened with
+// BTN_RIGHT on a Settings row.
+extern const InfoText settings_info[6];

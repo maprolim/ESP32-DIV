@@ -183,3 +183,28 @@ const InfoText ir_info[4] = {
      "Transmite um banco de comandos genericos para tentar controlar ou desligar diferentes marcas de aparelhos de ar-condicionado.",
      "Transmite un banco de comandos genericos para intentar controlar o apagar diferentes marcas de aparatos de aire acondicionado."},
 };
+
+// Order matches itemKeys[] in utils.cpp (AppSettingsUI): Brightness, Theme,
+// Accent, NeoPixel, Auto Scan, Language. Shown when BTN_RIGHT is pressed on a
+// Settings row. Press the middle button on a row to edit it, then use left/
+// right to change the value -- these paragraphs explain what each one does.
+const InfoText settings_info[6] = {
+    {"Adjusts how bright the screen backlight is. Lower values save battery and are easier on the eyes in the dark; higher values improve readability under strong light.",
+     "Ajusta o quanto a luz de fundo da tela brilha. Valores baixos economizam bateria e cansam menos a vista no escuro; valores altos melhoram a leitura sob luz forte.",
+     "Ajusta cuanto brilla la luz de fondo de la pantalla. Los valores bajos ahorran bateria y cansan menos la vista en la oscuridad; los valores altos mejoran la lectura bajo luz fuerte."},
+    {"Switches the interface between the dark and light color themes. Dark is better in low light and saves power; light is clearer under bright ambient light.",
+     "Alterna a interface entre os temas de cor escuro e claro. O escuro e melhor em ambientes com pouca luz e economiza energia; o claro fica mais nitido sob luz ambiente intensa.",
+     "Alterna la interfaz entre los temas de color oscuro y claro. El oscuro es mejor con poca luz y ahorra energia; el claro se ve mas nitido bajo luz ambiente intensa."},
+    {"Chooses the highlight color used across the interface for cursors, icons, and selected items. It is purely cosmetic and does not affect any function.",
+     "Escolhe a cor de destaque usada em toda a interface para cursores, icones e itens selecionados. E apenas estetico e nao afeta nenhuma funcao.",
+     "Elige el color de acento usado en toda la interfaz para cursores, iconos y elementos seleccionados. Es puramente estetico y no afecta ninguna funcion."},
+    {"Turns the onboard RGB LED (NeoPixel) on or off. When off, the LED stays dark to save a little power and avoid drawing attention; when on, it shows status colors.",
+     "Liga ou desliga o LED RGB embutido (NeoPixel). Quando desligado, o LED fica apagado para economizar um pouco de energia e nao chamar atencao; quando ligado, ele mostra cores de status.",
+     "Enciende o apaga el LED RGB integrado (NeoPixel). Cuando esta apagado, el LED permanece oscuro para ahorrar algo de energia y no llamar la atencion; cuando esta encendido, muestra colores de estado."},
+    {"When on, the device starts scanning for Wi-Fi and Bluetooth automatically as soon as you open those features, so you skip starting each scan by hand.",
+     "Quando ligado, o aparelho comeca a escanear Wi-Fi e Bluetooth automaticamente assim que voce abre esses recursos, dispensando iniciar cada varredura na mao.",
+     "Cuando esta encendido, el dispositivo comienza a escanear Wi-Fi y Bluetooth automaticamente en cuanto abres esas funciones, evitando iniciar cada escaneo a mano."},
+    {"Sets the language used throughout the interface: menus, feature names, and these info screens. Press the middle button on this row to open the language list.",
+     "Define o idioma usado em toda a interface: menus, nomes dos recursos e estas telas de informacao. Aperte o botao do meio nesta linha para abrir a lista de idiomas.",
+     "Establece el idioma usado en toda la interfaz: menus, nombres de las funciones y estas pantallas de informacion. Pulsa el boton central en esta fila para abrir la lista de idiomas."},
+};

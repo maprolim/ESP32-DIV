@@ -4211,24 +4211,28 @@ void handleAboutPage() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
 
+  // Whole content block (title through hardware rows) shifts up by this
+  // amount to keep the last hardware row clear of the fixed footer at y=300.
+  const int yOff = -18;
+
   tft.setTextFont(2);
   tft.setTextColor(UI_ICON, UI_BG);
-  tft.setCursor(16, 40);
+  tft.setCursor(16, 40 + yOff);
   tftPrintObf(OBF_PN, sizeof(OBF_PN));
 
   tft.setTextFont(1);
   tft.setTextColor(UI_DIM_TEXT, UI_BG);
-  tft.setCursor(16, 60);
+  tft.setCursor(16, 60 + yOff);
   tft.print(t(STR_ABOUT_BY));
   tftPrintObf(OBF_DN, sizeof(OBF_DN));
   tft.print(" - ");
   tft.print(ESP32DIV_VERSION);
 
-  tft.drawFastHLine(12, 78, 216, UI_LINE);
+  tft.drawFastHLine(12, 78 + yOff, 216, UI_LINE);
 
   const int xLabel = 16;
   const int xValue = 80;
-  int y = 96;
+  int y = 96 + yOff;
   const int step = 22;
 
   tft.setTextColor(UI_DIM_TEXT, UI_BG);
@@ -4281,10 +4285,10 @@ void handleAboutPage() {
     if (!installed.length()) installed = "-";
     if (!supported.length()) supported = "-";
 
-    tft.drawFastHLine(12, 186, 216, UI_LINE);
+    tft.drawFastHLine(12, 186 + yOff, 216, UI_LINE);
 
     tft.setTextColor(UI_ICON, UI_BG);
-    tft.setCursor(16, 194);
+    tft.setCursor(16, 194 + yOff);
     tft.print("HARDWARE");
 
     const char* lblBuiltin    = t(STR_ABOUT_BUILTIN);
@@ -4299,7 +4303,7 @@ void handleAboutPage() {
     widest = max(widest, (int)tft.textWidth(lblUnsupported));
     const int hwColonX = hwLabelX + widest + 2;
     const int hwValueX = hwColonX + 8;
-    int hy = 214;
+    int hy = 214 + yOff;
     const int hstep = 18;  // 2px tighter than the original 20, to help fit a wrapped line
 
     // Hanging indent: when a value is too wide for the line (e.g. PT-BR's
