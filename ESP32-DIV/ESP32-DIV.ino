@@ -145,16 +145,18 @@ const StrKey other_submenu_items[other_NUM_SUBMENU_ITEMS] = {
     STR_TILE_GPS,
     STR_MORE_BACK};
 
-const int rfid_NUM_SUBMENU_ITEMS = 9;
+const int rfid_NUM_SUBMENU_ITEMS = 11;
 const StrKey rfid_submenu_items[rfid_NUM_SUBMENU_ITEMS] = {
     STR_RFID_CARD_READER,
     STR_RFID_CARD_CLONE,
+    STR_RFID_CLONE2,
     STR_RFID_ERASE,
     STR_RFID_DUMP,
     STR_RFID_DECODE_ACCESS,
     STR_RFID_JAM_READER,
     STR_RFID_TAG_DISRUPT,
     STR_RFID_DISRUPT_EMULATE,
+    STR_RFID_EMULATE,
     STR_BACK_TO_MAIN_MENU};
 
 // Info text (BTN_RIGHT) -- see rfid_info in LangInfo.cpp, same order as
@@ -265,15 +267,17 @@ const unsigned char *other_submenu_icons[other_NUM_SUBMENU_ITEMS] = {
 };
 
 const unsigned char *rfid_submenu_icons[rfid_NUM_SUBMENU_ITEMS] = {
-    bitmap_icon_magnifying_glass,
-    bitmap_icon_follow,
-    bitmap_icon_recycle,
-    bitmap_icon_dot_matrix,
-    bitmap_icon_key,
-    bitmap_icon_kill,
-    bitmap_icon_flash,
-    bitmap_icon_devil,
-    bitmap_icon_go_back
+    bitmap_icon_magnifying_glass,  // Card Reader
+    bitmap_icon_follow,            // Card Clone
+    bitmap_icon_follow,            // Clone Card 2
+    bitmap_icon_recycle,           // Erase
+    bitmap_icon_dot_matrix,        // Dump
+    bitmap_icon_key,               // Decode Access
+    bitmap_icon_kill,              // Jam Reader
+    bitmap_icon_flash,             // Tag Disrupt
+    bitmap_icon_devil,             // Disrupt Emulate
+    bitmap_icon_wifi,              // Emulate Card
+    bitmap_icon_go_back            // Back
 };
 
 const unsigned char *gps_submenu_icons[gps_NUM_SUBMENU_ITEMS] = {
@@ -3644,22 +3648,28 @@ static void otherRfidPlaceholderAction(int idx) {
                 RfidNfc::sessionClone();
                 break;
             case 2:
-                RfidNfc::sessionErase();
+                RfidNfc::sessionClone2();
                 break;
             case 3:
-                RfidNfc::sessionDump();
+                RfidNfc::sessionErase();
                 break;
             case 4:
-                RfidNfc::sessionDecodeAccess();
+                RfidNfc::sessionDump();
                 break;
             case 5:
-                RfidNfc::sessionJamReader();
+                RfidNfc::sessionDecodeAccess();
                 break;
             case 6:
-                RfidNfc::sessionTagDisrupt();
+                RfidNfc::sessionJamReader();
                 break;
             case 7:
+                RfidNfc::sessionTagDisrupt();
+                break;
+            case 8:
                 RfidNfc::sessionDisruptEmulate();
+                break;
+            case 9:
+                RfidNfc::sessionEmulate();
                 break;
             default:
                 feature_active = false;
