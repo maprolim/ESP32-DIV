@@ -14,7 +14,9 @@
 #include "rfid.h"
 #include "shared.h"
 #include "utils.h"
+#include "wifi5g.h"
 #include "hwdetect.h"
+#include "SkimmerDetect2.h"
 
 #if !BOARD_HAS_ESP32S3
 #include "soc/soc.h"
@@ -27,6 +29,32 @@ PCF8574 pcf(PCF8574_I2C_ADDR);
 
 void setBrightness(uint8_t value) {
   ledcWrite(PWM_CHANNEL, value);
+}
+
+// ---------------------------------------------------------------------------
+// Desliga a TELA de verdade. Nao e "brilho no minimo":
+//   1) o PWM do backlight e destacado e o pino e forcado em LOW -> zero energia
+//   2) o painel entra em SLPIN (0x10) -> controlador em sleep
+// NAO usar DISPOFF (0x28): no ILI9341 ele deixa o painel TODO BRANCO.
+// ---------------------------------------------------------------------------
+// Valor de duty que APAGA o backlight. MEDIDO no aparelho (olhando a luz de
+// fundo pela lateral): o backlight e ATIVO-ALTO. duty 0 (LOW) = mais fraco,
+// duty 255 (HIGH) = mais forte. Para apagar, usa 0. (Ha um brilho residual
+// minimo mesmo em 0 - limite de hardware desta placa.)
+#ifndef BACKLIGHT_OFF_DUTY
+#define BACKLIGHT_OFF_DUTY 0
+#endif
+
+void screenPowerOff() {
+  // Painel preto + backlight em duty 0 (o minimo que esta placa permite).
+  // ATIVO-ALTO: HIGH acende, LOW apaga. Por isso e duty 0, nao 255.
+  tft.fillScreen(TFT_BLACK);
+  ledcWrite(PWM_CHANNEL, BACKLIGHT_OFF_DUTY);
+}
+
+void screenPowerOn(uint8_t brightness) {
+  if (brightness == 0) brightness = BKL_LEVEL_MED;
+  ledcWrite(PWM_CHANNEL, brightness);
 }
 
 bool feature_exit_requested = false;
@@ -57,12 +85,12 @@ bool is_main_menu = false;
 
 // WiFi's 12 features as one flat list; the generic paged engine (below)
 // slices it into pages of kPagedItemsPerPage on its own.
-static constexpr int WIFI_FEATURE_COUNT = 12;
+static constexpr int WIFI_FEATURE_COUNT = 14;
 const StrKey wifi_items[WIFI_FEATURE_COUNT] = {
     STR_WIFI_PACKET_MONITOR,
     STR_WIFI_BEACON_SPAMMER,
     STR_WIFI_24GHZ_DEAUTHER,
-    STR_WIFI_PROBE_REQUEST_FLOOD,
+    STR_WIFI_24GHZ_DEAUTHER_2,
     STR_WIFI_DEAUTH_DETECTOR,
     STR_WIFI_24GHZ_SCANNER,
     STR_WIFI_CAPTIVE_PORTAL,
@@ -70,28 +98,33 @@ const StrKey wifi_items[WIFI_FEATURE_COUNT] = {
     STR_WIFI_WPS_SCANNER,
     STR_WIFI_ARP_SCANNER,
     STR_WIFI_KARMA_ATTACK,
-    STR_WIFI_CHANNEL_GRAPH};
+    STR_WIFI_CHANNEL_GRAPH,
+    STR_WIFI_PROBE_REQUEST_FLOOD,
+    STR_WIFI_5G};
 
 // Info text (BTN_RIGHT on the WiFi menu) -- see wifi_page0_info in LangInfo.cpp;
 // all 12 items have text (spans both paged-submenu pages).
-static constexpr int WIFI_INFO_COUNT = 12;
+static constexpr int WIFI_INFO_COUNT = 13;
 
-// Bluetooth's 9 features as one flat list, same idea as WiFi above.
-static constexpr int BT_FEATURE_COUNT = 9;
+// Bluetooth's 10 features as one flat list, same idea as WiFi above.
+// Order (8a/9a/10a opcoes): ..., Skimmer Detect (7), Skimmer Detect 2 (8),
+// Sniffer (9).
+static constexpr int BT_FEATURE_COUNT = 10;
 const StrKey bluetooth_items[BT_FEATURE_COUNT] = {
     STR_BT_BLE_JAMMER,
     STR_BT_BLE_SPOOFER,
     STR_BT_SOUR_APPLE,
     STR_BT_AIRTAG_SPOOFER,
     STR_BT_AIRTAG_SNIFFER,
-    STR_BT_SNIFFER,
     STR_BT_BLE_SCANNER,
     STR_BT_BLE_RUBBER_DUCKY,
-    STR_BT_SKIMMER_DETECT};
+    STR_BT_SKIMMER_DETECT,
+    STR_BT_SKIMMER_DETECT_2,
+    STR_BT_SNIFFER};
 
 // Info text (BTN_RIGHT) -- see bluetooth_page0_info in LangInfo.cpp;
-// all 9 items have text.
-static constexpr int BT_INFO_COUNT = 9;
+// all 10 items have text.
+static constexpr int BT_INFO_COUNT = 10;
 
 static FeatureUI::Button s_pagedFooterBtns[2];
 static int s_pagedFooterFocus = -1;  // 0=back, 1=page btn, -1=none
@@ -145,16 +178,18 @@ const StrKey other_submenu_items[other_NUM_SUBMENU_ITEMS] = {
     STR_TILE_GPS,
     STR_MORE_BACK};
 
-const int rfid_NUM_SUBMENU_ITEMS = 9;
+const int rfid_NUM_SUBMENU_ITEMS = 11;
 const StrKey rfid_submenu_items[rfid_NUM_SUBMENU_ITEMS] = {
     STR_RFID_CARD_READER,
     STR_RFID_CARD_CLONE,
+    STR_RFID_CLONE2,
     STR_RFID_ERASE,
     STR_RFID_DUMP,
     STR_RFID_DECODE_ACCESS,
     STR_RFID_JAM_READER,
     STR_RFID_TAG_DISRUPT,
     STR_RFID_DISRUPT_EMULATE,
+    STR_RFID_EMULATE,
     STR_BACK_TO_MAIN_MENU};
 
 // Info text (BTN_RIGHT) -- see rfid_info in LangInfo.cpp, same order as
@@ -207,7 +242,7 @@ const unsigned char *wifi_icons[WIFI_FEATURE_COUNT] = {
     bitmap_icon_wifi,
     bitmap_icon_antenna,
     bitmap_icon_wifi_jammer,
-    bitmap_icon_Skull_3,
+    bitmap_icon_wifi_jammer,
     bitmap_icon_eye2,
     bitmap_icon_jammer,
     bitmap_icon_bash,
@@ -215,7 +250,9 @@ const unsigned char *wifi_icons[WIFI_FEATURE_COUNT] = {
     bitmap_icon_key,
     bitmap_icon_list,
     bitmap_icon_devil,
-    bitmap_icon_chart_dot
+    bitmap_icon_chart_dot,
+    bitmap_icon_Skull_3,
+    bitmap_icon_wifi
 };
 
 const unsigned char *bluetooth_icons[BT_FEATURE_COUNT] = {
@@ -224,10 +261,11 @@ const unsigned char *bluetooth_icons[BT_FEATURE_COUNT] = {
     bitmap_icon_apple,
     bitmap_icon_tags,
     bitmap_icon_magnifying_glass,
-    bitmap_icon_analyzer,
     bitmap_icon_graph,
     bitmap_icon_rubber_ducky,
-    bitmap_icon_Wireless_4
+    bitmap_icon_Wireless_4,
+    bitmap_icon_signals,
+    bitmap_icon_analyzer
 };
 
 const unsigned char *nrf_submenu_icons[nrf_NUM_SUBMENU_ITEMS] = {
@@ -265,15 +303,17 @@ const unsigned char *other_submenu_icons[other_NUM_SUBMENU_ITEMS] = {
 };
 
 const unsigned char *rfid_submenu_icons[rfid_NUM_SUBMENU_ITEMS] = {
-    bitmap_icon_magnifying_glass,
-    bitmap_icon_follow,
-    bitmap_icon_recycle,
-    bitmap_icon_dot_matrix,
-    bitmap_icon_key,
-    bitmap_icon_kill,
-    bitmap_icon_flash,
-    bitmap_icon_devil,
-    bitmap_icon_go_back
+    bitmap_icon_magnifying_glass,  // Card Reader
+    bitmap_icon_follow,            // Card Clone
+    bitmap_icon_follow,            // Clone Card 2
+    bitmap_icon_recycle,           // Erase
+    bitmap_icon_dot_matrix,        // Dump
+    bitmap_icon_key,               // Decode Access
+    bitmap_icon_kill,              // Jam Reader
+    bitmap_icon_flash,             // Tag Disrupt
+    bitmap_icon_devil,             // Disrupt Emulate
+    bitmap_icon_wifi,              // Emulate Card
+    bitmap_icon_go_back            // Back
 };
 
 const unsigned char *gps_submenu_icons[gps_NUM_SUBMENU_ITEMS] = {
@@ -967,13 +1007,16 @@ static void showFeatureUnavailable(const char* featureName, const char* requirem
 
 static void runBleDuckyFeature() {
 #if FEATURE_BLE_DUCKY
-  current_submenu_index = 5;
+  // Sentinela = indice atual do Rubber Ducky no menu Bluetooth (posicao 7,
+  // indice 6). Precisa bater com o dispatch abaixo, senao o highlight de
+  // volta ao menu cai no item errado.
+  current_submenu_index = 6;
   in_sub_menu = true;
   feature_active = true;
   feature_exit_requested = false;
   Ducky::enter();
-  while (current_submenu_index == 5 && !feature_exit_requested) {
-      current_submenu_index = 5;
+  while (current_submenu_index == 6 && !feature_exit_requested) {
+      current_submenu_index = 6;
       in_sub_menu = true;
       Ducky::loop();
   }
@@ -1649,19 +1692,21 @@ void handleWiFiSubmenuButtons() {
             }
         }
 
-        if (g_pagedPage == 0 && current_submenu_index == 2) {
-            current_submenu_index = 2;
+
+        if (g_pagedPage == 1 && current_submenu_index == 3) {
+            current_submenu_index = 3;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
-            Deauther::deautherSetup();
-            // Saida e so do deautherLoop() (fisico LEFT na lista de scan),
-            // que seta feature_exit_requested. NAO ter um checkpoint de saida
-            // aqui tambem em cima do SELECT -- SELECT agora e "View"/start-stop.
-            while (current_submenu_index == 2 && !feature_exit_requested) {
-                current_submenu_index = 2;
+            ProbeRequestFlood::probeRequestFloodSetup();
+            // Saida e so do probeRequestFloodLoop() (fisico LEFT na lista de
+            // scan), que seta feature_exit_requested. NAO ter um checkpoint
+            // de saida aqui tambem em cima do SELECT -- SELECT agora e
+            // "View"/start-stop.
+            while (g_pagedPage == 1 && current_submenu_index == 3 && !feature_exit_requested) {
+                current_submenu_index = 3;
                 in_sub_menu = true;
-                Deauther::deautherLoop();
+                ProbeRequestFlood::probeRequestFloodLoop();
             }
             if (feature_exit_requested) {
                 waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
@@ -1675,23 +1720,19 @@ void handleWiFiSubmenuButtons() {
             }
         }
 
-        if (g_pagedPage == 0 && current_submenu_index == 3) {
-            current_submenu_index = 3;
+        if (g_pagedPage == 1 && current_submenu_index == 4) {
+            current_submenu_index = 4;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
-            ProbeRequestFlood::probeRequestFloodSetup();
-            // Saida e so do probeRequestFloodLoop() (fisico LEFT na lista de
-            // scan), que seta feature_exit_requested. NAO ter um checkpoint
-            // de saida aqui tambem em cima do SELECT -- SELECT agora e
-            // "View"/start-stop.
-            while (current_submenu_index == 3 && !feature_exit_requested) {
-                current_submenu_index = 3;
+            Wifi5g::wifi5gSetup();
+            while (g_pagedPage == 1 && current_submenu_index == 4 && !feature_exit_requested) {
+                current_submenu_index = 4;
                 in_sub_menu = true;
-                ProbeRequestFlood::probeRequestFloodLoop();
+                Wifi5g::wifi5gLoop();
             }
             if (feature_exit_requested) {
-                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
+                waitButtonReleased(BTN_LEFT);
                 in_sub_menu = true;
                 is_main_menu = false;
                 submenu_initialized = false;
@@ -1895,6 +1936,56 @@ void handleWiFiSubmenuButtons() {
                 delay(200);
             }
         }
+        if (g_pagedPage == 0 && current_submenu_index == 2) {
+            current_submenu_index = 2;
+            in_sub_menu = true;
+            feature_active = true;
+            feature_exit_requested = false;
+            Deauther::deautherSetup();
+            // Saida e so do deautherLoop() (fisico LEFT na lista de scan),
+            // que seta feature_exit_requested. NAO ter um checkpoint de saida
+            // aqui tambem em cima do SELECT -- SELECT agora e "View"/start-stop.
+            while (current_submenu_index == 2 && !feature_exit_requested) {
+                current_submenu_index = 2;
+                in_sub_menu = true;
+                Deauther::deautherLoop();
+            }
+            if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
+                in_sub_menu = true;
+                is_main_menu = false;
+                submenu_initialized = false;
+                feature_active = false;
+                feature_exit_requested = false;
+                displaySubmenu();
+                delay(200);
+            }
+        }
+
+        if (g_pagedPage == 0 && current_submenu_index == 3) {
+            current_submenu_index = 3;
+            in_sub_menu = true;
+            feature_active = true;
+            feature_exit_requested = false;
+            Deauther2::deauther2Setup();
+            // Saida e so do deauther2Loop() (fisico LEFT na lista de scan),
+            // que seta feature_exit_requested. RIGHT alterna grupo/so-este-no.
+            while (g_pagedPage == 0 && current_submenu_index == 3 && !feature_exit_requested) {
+                current_submenu_index = 3;
+                in_sub_menu = true;
+                Deauther2::deauther2Loop();
+            }
+            if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);
+                in_sub_menu = true;
+                is_main_menu = false;
+                submenu_initialized = false;
+                feature_active = false;
+                feature_exit_requested = false;
+                displaySubmenu();
+                delay(200);
+            }
+        }
     }
 
     if (!feature_active) {
@@ -1999,32 +2090,7 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (g_pagedPage == 0 && current_submenu_index == 2) {
-                    current_submenu_index = 2;
-                    in_sub_menu = true;
-                    feature_active = true;
-                    feature_exit_requested = false;
-                    Deauther::deautherSetup();
-                    // Saida e so do deautherLoop() (fisico LEFT na lista de
-                    // scan), que seta feature_exit_requested. NAO ter um
-                    // checkpoint de saida aqui tambem em cima do SELECT --
-                    // SELECT agora e "View"/start-stop.
-                    while (current_submenu_index == 2 && !feature_exit_requested) {
-                        current_submenu_index = 2;
-                        in_sub_menu = true;
-                        Deauther::deautherLoop();
-                    }
-                    if (feature_exit_requested) {
-                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                    }
-                } else if (g_pagedPage == 0 && current_submenu_index == 3) {
+                } else if (g_pagedPage == 1 && current_submenu_index == 3) {
                     current_submenu_index = 3;
                     in_sub_menu = true;
                     feature_active = true;
@@ -2034,7 +2100,7 @@ void handleWiFiSubmenuButtons() {
                     // lista de scan), que seta feature_exit_requested. NAO
                     // ter um checkpoint de saida aqui tambem em cima do
                     // SELECT -- SELECT agora e "View"/start-stop.
-                    while (current_submenu_index == 3 && !feature_exit_requested) {
+                    while (g_pagedPage == 1 && current_submenu_index == 3 && !feature_exit_requested) {
                         current_submenu_index = 3;
                         in_sub_menu = true;
                         ProbeRequestFlood::probeRequestFloodLoop();
@@ -2232,6 +2298,52 @@ void handleWiFiSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
+                } else if (g_pagedPage == 0 && current_submenu_index == 2) {
+                    current_submenu_index = 2;
+                    in_sub_menu = true;
+                    feature_active = true;
+                    feature_exit_requested = false;
+                    Deauther::deautherSetup();
+                    // Saida e so do deautherLoop() (fisico LEFT na lista de
+                    // scan), que seta feature_exit_requested. NAO ter um
+                    // checkpoint de saida aqui tambem em cima do SELECT --
+                    // SELECT agora e "View"/start-stop.
+                    while (current_submenu_index == 2 && !feature_exit_requested) {
+                        current_submenu_index = 2;
+                        in_sub_menu = true;
+                        Deauther::deautherLoop();
+                    }
+                    if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // evita reler o mesmo toque como "voltar" de novo no menu principal
+                        in_sub_menu = true;
+                        is_main_menu = false;
+                        submenu_initialized = false;
+                        feature_active = false;
+                        feature_exit_requested = false;
+                        displaySubmenu();
+                        delay(200);
+                    }
+                } else if (g_pagedPage == 0 && current_submenu_index == 3) {
+                    current_submenu_index = 3;
+                    in_sub_menu = true;
+                    feature_active = true;
+                    feature_exit_requested = false;
+                    Deauther2::deauther2Setup();
+                    while (g_pagedPage == 0 && current_submenu_index == 3 && !feature_exit_requested) {
+                        current_submenu_index = 3;
+                        in_sub_menu = true;
+                        Deauther2::deauther2Loop();
+                    }
+                    if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);
+                        in_sub_menu = true;
+                        is_main_menu = false;
+                        submenu_initialized = false;
+                        feature_active = false;
+                        feature_exit_requested = false;
+                        displaySubmenu();
+                        delay(200);
+                    }
                 }
                 break;
             }
@@ -2270,15 +2382,15 @@ void handleBluetoothSubmenuButtons() {
         waitButtonReleased(BTN_DOWN);
     }
 
-    // RIGHT on the selected item: opens a full-screen info page. All 9
-    // Bluetooth features have text (BT_INFO_COUNT); they all fit on a
-    // single paged-submenu page (9 == kPagedItemsPerPage), so no
-    // page-relative index math is needed here, unlike the WiFi menu.
+    // RIGHT on the selected item: opens a full-screen info page. Bluetooth now
+    // has 10 features (2 paged-submenu pages), so the array index has to
+    // account for the current page -- same page-relative math as the WiFi menu.
     if (isButtonPressed(BTN_RIGHT)) {
         waitButtonReleased(BTN_RIGHT);
-        if (g_pagedPage == 0 && current_submenu_index < BT_INFO_COUNT) {
-            showFeatureInfoScreen(t(bluetooth_items[current_submenu_index]),
-                                  bluetooth_page0_info[current_submenu_index]);
+        const int btGlobalIndex = g_pagedPage * kPagedItemsPerPage + current_submenu_index;
+        if (current_submenu_index < pagedFeatureCount() && btGlobalIndex < BT_INFO_COUNT) {
+            showFeatureInfoScreen(t(bluetooth_items[btGlobalIndex]),
+                                  bluetooth_page0_info[btGlobalIndex]);
             submenu_initialized = false;
             last_submenu_index = -1;
             displaySubmenu();
@@ -2430,33 +2542,9 @@ void handleBluetoothSubmenuButtons() {
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
-            BleSniffer::blesnifferSetup();
+            BleScan::bleScanSetup();
             while (g_pagedPage == 0 && current_submenu_index == 5 && !feature_exit_requested) {
                 current_submenu_index = 5;
-                in_sub_menu = true;
-                BleSniffer::blesnifferLoop();
-            }
-            BleSniffer::exit();
-            if (feature_exit_requested) {
-                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
-                in_sub_menu = true;
-                is_main_menu = false;
-                submenu_initialized = false;
-                feature_active = false;
-                feature_exit_requested = false;
-                displaySubmenu();
-                delay(200);
-            }
-        }
-
-        if (g_pagedPage == 0 && current_submenu_index == 6) {
-            current_submenu_index = 6;
-            in_sub_menu = true;
-            feature_active = true;
-            feature_exit_requested = false;
-            BleScan::bleScanSetup();
-            while (g_pagedPage == 0 && current_submenu_index == 6 && !feature_exit_requested) {
-                current_submenu_index = 6;
                 in_sub_menu = true;
                 BleScan::bleScanLoop();
             }
@@ -2472,24 +2560,74 @@ void handleBluetoothSubmenuButtons() {
                 delay(200);
             }
         }
-        if (g_pagedPage == 0 && current_submenu_index == 7) {
+
+        if (g_pagedPage == 0 && current_submenu_index == 6) {
             runBleDuckyFeature();
         }
 
-        // Skimmer Detect: was page1/slot0 back when BT was split 8+1; now all
-        // 9 BT features fit on one page, so this is slot 8 of page 0.
+        // 8a opcao: Skimmer Detect (slot 7 da pagina 0).
+        if (g_pagedPage == 0 && current_submenu_index == 7) {
+            current_submenu_index = 7;
+            in_sub_menu = true;
+            feature_active = true;
+            feature_exit_requested = false;
+            BleSkimmer::bleSkimmerSetup();
+            while (current_submenu_index == 7 && !feature_exit_requested) {
+                current_submenu_index = 7;
+                in_sub_menu = true;
+                BleSkimmer::bleSkimmerLoop();
+            }
+            BleSkimmer::exit();
+            if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
+                in_sub_menu = true;
+                is_main_menu = false;
+                submenu_initialized = false;
+                feature_active = false;
+                feature_exit_requested = false;
+                displaySubmenu();
+                delay(200);
+            }
+        }
+
+        // 9a opcao: Skimmer Detect 2 (slot 8 da pagina 0).
         if (g_pagedPage == 0 && current_submenu_index == 8) {
             current_submenu_index = 8;
             in_sub_menu = true;
             feature_active = true;
             feature_exit_requested = false;
-            BleSkimmer::bleSkimmerSetup();
+            BleSkimmer2::bleSkimmer2Setup();
             while (current_submenu_index == 8 && !feature_exit_requested) {
                 current_submenu_index = 8;
                 in_sub_menu = true;
-                BleSkimmer::bleSkimmerLoop();
+                BleSkimmer2::bleSkimmer2Loop();
             }
-            BleSkimmer::exit();
+            BleSkimmer2::exit();
+            if (feature_exit_requested) {
+                waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
+                in_sub_menu = true;
+                is_main_menu = false;
+                submenu_initialized = false;
+                feature_active = false;
+                feature_exit_requested = false;
+                displaySubmenu();
+                delay(200);
+            }
+        }
+
+        // 10a opcao: Sniffer (slot 0 da pagina 1).
+        if (g_pagedPage == 1 && current_submenu_index == 0) {
+            current_submenu_index = 0;
+            in_sub_menu = true;
+            feature_active = true;
+            feature_exit_requested = false;
+            BleSniffer::blesnifferSetup();
+            while (g_pagedPage == 1 && current_submenu_index == 0 && !feature_exit_requested) {
+                current_submenu_index = 0;
+                in_sub_menu = true;
+                BleSniffer::blesnifferLoop();
+            }
+            BleSniffer::exit();
             if (feature_exit_requested) {
                 waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                 in_sub_menu = true;
@@ -2667,31 +2805,9 @@ void handleBluetoothSubmenuButtons() {
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
-                    BleSniffer::blesnifferSetup();
+                    BleScan::bleScanSetup();
                     while (g_pagedPage == 0 && current_submenu_index == 5 && !feature_exit_requested) {
                         current_submenu_index = 5;
-                        in_sub_menu = true;
-                        BleSniffer::blesnifferLoop();
-                    }
-                    BleSniffer::exit();
-                    if (feature_exit_requested) {
-                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
-                        in_sub_menu = true;
-                        is_main_menu = false;
-                        submenu_initialized = false;
-                        feature_active = false;
-                        feature_exit_requested = false;
-                        displaySubmenu();
-                        delay(200);
-                    }
-                } else if (g_pagedPage == 0 && current_submenu_index == 6) {
-                    current_submenu_index = 6;
-                    in_sub_menu = true;
-                    feature_active = true;
-                    feature_exit_requested = false;
-                    BleScan::bleScanSetup();
-                    while (g_pagedPage == 0 && current_submenu_index == 6 && !feature_exit_requested) {
-                        current_submenu_index = 6;
                         in_sub_menu = true;
                         BleScan::bleScanLoop();
                     }
@@ -2706,20 +2822,64 @@ void handleBluetoothSubmenuButtons() {
                         displaySubmenu();
                         delay(200);
                     }
-                } else if (g_pagedPage == 0 && current_submenu_index == 7) {
+                } else if (g_pagedPage == 0 && current_submenu_index == 6) {
                     runBleDuckyFeature();
+                } else if (g_pagedPage == 0 && current_submenu_index == 7) {
+                    current_submenu_index = 7;
+                    in_sub_menu = true;
+                    feature_active = true;
+                    feature_exit_requested = false;
+                    BleSkimmer::bleSkimmerSetup();
+                    while (current_submenu_index == 7 && !feature_exit_requested) {
+                        current_submenu_index = 7;
+                        in_sub_menu = true;
+                        BleSkimmer::bleSkimmerLoop();
+                    }
+                    BleSkimmer::exit();
+                    if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
+                        in_sub_menu = true;
+                        is_main_menu = false;
+                        submenu_initialized = false;
+                        feature_active = false;
+                        feature_exit_requested = false;
+                        displaySubmenu();
+                        delay(200);
+                    }
                 } else if (g_pagedPage == 0 && current_submenu_index == 8) {
                     current_submenu_index = 8;
                     in_sub_menu = true;
                     feature_active = true;
                     feature_exit_requested = false;
-                    BleSkimmer::bleSkimmerSetup();
+                    BleSkimmer2::bleSkimmer2Setup();
                     while (current_submenu_index == 8 && !feature_exit_requested) {
                         current_submenu_index = 8;
                         in_sub_menu = true;
-                        BleSkimmer::bleSkimmerLoop();
+                        BleSkimmer2::bleSkimmer2Loop();
                     }
-                    BleSkimmer::exit();
+                    BleSkimmer2::exit();
+                    if (feature_exit_requested) {
+                        waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
+                        in_sub_menu = true;
+                        is_main_menu = false;
+                        submenu_initialized = false;
+                        feature_active = false;
+                        feature_exit_requested = false;
+                        displaySubmenu();
+                        delay(200);
+                    }
+                } else if (g_pagedPage == 1 && current_submenu_index == 0) {
+                    current_submenu_index = 0;
+                    in_sub_menu = true;
+                    feature_active = true;
+                    feature_exit_requested = false;
+                    BleSniffer::blesnifferSetup();
+                    while (g_pagedPage == 1 && current_submenu_index == 0 && !feature_exit_requested) {
+                        current_submenu_index = 0;
+                        in_sub_menu = true;
+                        BleSniffer::blesnifferLoop();
+                    }
+                    BleSniffer::exit();
                     if (feature_exit_requested) {
                         waitButtonReleased(BTN_LEFT);  // avoid re-reading the same LEFT press as "back" again one level up
                         in_sub_menu = true;
@@ -3644,22 +3804,28 @@ static void otherRfidPlaceholderAction(int idx) {
                 RfidNfc::sessionClone();
                 break;
             case 2:
-                RfidNfc::sessionErase();
+                RfidNfc::sessionClone2();
                 break;
             case 3:
-                RfidNfc::sessionDump();
+                RfidNfc::sessionErase();
                 break;
             case 4:
-                RfidNfc::sessionDecodeAccess();
+                RfidNfc::sessionDump();
                 break;
             case 5:
-                RfidNfc::sessionJamReader();
+                RfidNfc::sessionDecodeAccess();
                 break;
             case 6:
-                RfidNfc::sessionTagDisrupt();
+                RfidNfc::sessionJamReader();
                 break;
             case 7:
+                RfidNfc::sessionTagDisrupt();
+                break;
+            case 8:
                 RfidNfc::sessionDisruptEmulate();
+                break;
+            case 9:
+                RfidNfc::sessionEmulate();
                 break;
             default:
                 feature_active = false;
@@ -4562,6 +4728,10 @@ void handleButtons() {
     }
 }
 
+
+
+#include "crypto1.h"
+
 void setup() {
   Serial.begin(115200);
   delay(50);
@@ -4599,6 +4769,8 @@ void setup() {
 #endif
   applyThemeToPalette(settings().theme);
   setBrightness(settings().brightness);
+
+
 
 #if HAS_PCF8574_BUTTONS
   if (!initPcf8574Buttons()) {
@@ -4640,6 +4812,7 @@ void setup() {
   setupTouchscreen();
 
   last_interaction_time = millis();
+  Serial.printf("C1 SELFTEST: %s\n", crypto1_self_test() ? "OK" : "FAIL");
   Serial.println("[boot] ready");
 }
 

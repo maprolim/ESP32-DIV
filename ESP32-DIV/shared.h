@@ -293,6 +293,16 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #define BUZZER_PIN -1
 #endif
 
+/* NeoPixel (WS2812) de status - LED acima da tela.
+   Esquema oficial ESP32-DIV: DIN no GPIO 1. O CYD nao tem esse LED. */
+#ifndef NEOPIXEL_PIN
+#if defined(BOARD_CYD)
+#define NEOPIXEL_PIN -1
+#else
+#define NEOPIXEL_PIN 1
+#endif
+#endif
+
 /* Backlight / PWM */
 #ifndef BACKLIGHT_PIN
 #if defined(BOARD_CYD)
@@ -426,7 +436,7 @@ static const uint8_t OBF_WB[]   = {75, 97, 110, 109, 122, 92, 109, 107, 96, 38, 
 #if defined(BOARD_CYD)
 #define PN532_SS   25
 #else
-#define PN532_SS   5
+#define PN532_SS   42
 #endif
 #endif
 

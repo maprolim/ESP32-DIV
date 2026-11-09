@@ -73,16 +73,18 @@ const LocStr STRINGS[STR_KEY_COUNT] = {
     // WiFi features
     {"Packet Monitor", "Monitor de Pacotes", "Monitor de Paquetes"},             // STR_WIFI_PACKET_MONITOR
     {"Beacon Spammer", "Spammer de Beacons", "Spammer de Beacons"},              // STR_WIFI_BEACON_SPAMMER
-    {"WiFi 2.4GHz Deauther", "Desautenticador WiFi 2.4GHz", "Desautenticador WiFi 2.4GHz"}, // STR_WIFI_24GHZ_DEAUTHER
+    {"Deauther", "Desautenticador", "Desautenticador"}, // STR_WIFI_24GHZ_DEAUTHER
     {"Probe Request Flood", "Inundacao de Probe Request", "Inundacion de Probe Request"},   // STR_WIFI_PROBE_REQUEST_FLOOD
     {"Deauth Detector", "Detector de Desautenticacao", "Detector de Desautenticacion"},     // STR_WIFI_DEAUTH_DETECTOR
-    {"WiFi 2.4GHz Scanner", "Scanner WiFi 2.4GHz", "Escaner WiFi 2.4GHz"},       // STR_WIFI_24GHZ_SCANNER
+    {"Scanner (2.4)", "Scanner (2.4)", "Escaner (2.4)"},       // STR_WIFI_24GHZ_SCANNER
     {"Captive Portal", "Portal Cativo", "Portal Cautivo"},                       // STR_WIFI_CAPTIVE_PORTAL
     {"Hidden SSID Revealer", "Revelador de SSID Oculto", "Revelador de SSID Oculto"},       // STR_WIFI_HIDDEN_SSID_REVEALER
     {"WPS Scanner", "Scanner WPS", "Escaner WPS"},                              // STR_WIFI_WPS_SCANNER
     {"ARP Scanner", "Scanner ARP", "Escaner ARP"},                              // STR_WIFI_ARP_SCANNER
     {"Karma Attack", "Ataque Karma", "Ataque Karma"},                           // STR_WIFI_KARMA_ATTACK
-    {"Channel Graph", "Grafico de Canais", "Grafico de Canales"},               // STR_WIFI_CHANNEL_GRAPH
+    {"Channel Graph (2.4)", "Grafico de Canais (2.4)", "Grafico de Canales (2.4)"},               // STR_WIFI_CHANNEL_GRAPH
+    {"Deauther (2)", "Desautenticador (2)", "Desautenticador (2)"}, // STR_WIFI_24GHZ_DEAUTHER_2
+    {"Wi-Fi 5G", "Wi-Fi 5G", "Wi-Fi 5G"},                              // STR_WIFI_5G
 
     // Bluetooth features
     {"BLE Jammer", "Bloqueador BLE", "Bloqueador BLE"},                         // STR_BT_BLE_JAMMER
@@ -94,6 +96,7 @@ const LocStr STRINGS[STR_KEY_COUNT] = {
     {"BLE Scanner", "Scanner BLE", "Escaner BLE"},                             // STR_BT_BLE_SCANNER
     {"BLE Rubber Ducky", "BLE Rubber Ducky", "BLE Rubber Ducky"},              // STR_BT_BLE_RUBBER_DUCKY
     {"Skimmer Detect", "Deteccao de Skimmer", "Deteccion de Skimmer"},         // STR_BT_SKIMMER_DETECT
+    {"Skimmer Detect 2", "Deteccao de Skimmer 2", "Deteccion de Skimmer 2"},   // STR_BT_SKIMMER_DETECT_2
 
     // nRF24 features
     {"Scanner", "Scanner", "Escaner"},                                          // STR_NRF_SCANNER
@@ -125,6 +128,8 @@ const LocStr STRINGS[STR_KEY_COUNT] = {
     {"Jam Reader", "Bloquear Leitor", "Bloquear Lector"},                     // STR_RFID_JAM_READER
     {"Tag Disrupt", "Interromper Tag", "Interrumpir Tag"},                    // STR_RFID_TAG_DISRUPT
     {"Disrupt Emulate", "Interromper e Emular", "Interrumpir y Emular"},      // STR_RFID_DISRUPT_EMULATE
+    {"Emulate Card", "Emular Cartao", "Emular Tarjeta"},                       // STR_RFID_EMULATE
+    {"Clone Card 2", "Clonar Cartao 2", "Clonar Tarjeta 2"},                   // STR_RFID_CLONE2
 
     // GPS features
     {"Wardriver", "Wardriver", "Wardriver"},                                  // STR_GPS_WARDRIVER
@@ -162,6 +167,8 @@ const LocStr STRINGS[STR_KEY_COUNT] = {
     {"Log", "Log", "Log"},                                       // STR_NAV_LOG
     {"Reset", "Zerar", "Reset"},                                 // STR_NAV_RESET
     {"Rename", "Renom.", "Renom."},                              // STR_NAV_RENAME
+    {"Read", "Ler", "Leer"},                                      // STR_NAV_READ
+    {"List", "Lista", "Lista"},                                    // STR_NAV_LIST
 
     // Saved-profile View screen delete confirmation (body text)
     {"Press Delete again to confirm", "Aperte Apagar de novo p/ confirmar", "Pulsa Borrar de nuevo p/ confirmar"}, // STR_PROFILE_DELETE_CONFIRM

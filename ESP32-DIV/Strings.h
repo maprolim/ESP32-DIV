@@ -100,6 +100,8 @@ enum StrKey : uint16_t {
   STR_WIFI_ARP_SCANNER,
   STR_WIFI_KARMA_ATTACK,
   STR_WIFI_CHANNEL_GRAPH,
+  STR_WIFI_24GHZ_DEAUTHER_2,
+  STR_WIFI_5G,
 
   // Bluetooth features (bluetooth_items, BT_FEATURE_COUNT)
   STR_BT_BLE_JAMMER,
@@ -111,6 +113,7 @@ enum StrKey : uint16_t {
   STR_BT_BLE_SCANNER,
   STR_BT_BLE_RUBBER_DUCKY,
   STR_BT_SKIMMER_DETECT,
+  STR_BT_SKIMMER_DETECT_2,
 
   // nRF24 features (nrf_submenu_items, excl. trailing Back)
   STR_NRF_SCANNER,
@@ -142,6 +145,8 @@ enum StrKey : uint16_t {
   STR_RFID_JAM_READER,
   STR_RFID_TAG_DISRUPT,
   STR_RFID_DISRUPT_EMULATE,
+  STR_RFID_EMULATE,
+  STR_RFID_CLONE2,
 
   // GPS features (gps_submenu_items, excl. trailing Back)
   STR_GPS_WARDRIVER,
@@ -183,6 +188,8 @@ enum StrKey : uint16_t {
   STR_NAV_LOG,
   STR_NAV_RESET,
   STR_NAV_RENAME,
+  STR_NAV_READ,
+  STR_NAV_LIST,
 
   // Saved-profile View screen: delete confirmation line (body text, full width)
   STR_PROFILE_DELETE_CONFIRM,

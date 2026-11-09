@@ -27,6 +27,8 @@ void sessionDump();
 void sessionDecodeAccess();
 void sessionJamReader();
 void sessionDisruptEmulate();
+void sessionEmulate();
+void sessionClone2();
 void sessionTagDisrupt();
 
 } // namespace RfidNfc

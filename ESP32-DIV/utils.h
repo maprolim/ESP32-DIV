@@ -52,6 +52,13 @@ void sdRetryMount();
 extern bool feature_exit_requested;
 
 extern void setBrightness(uint8_t value);
+
+// Liga/desliga a TELA de verdade (nao e "brilho minimo"):
+//   - backlight: o PWM e destacado e o pino vai a LOW (sem energia)
+//   - painel: recebe SLPIN (sleep), que e diferente de DISPOFF
+//     (DISPOFF deixa o painel BRANCO no ILI9341 - nao usar).
+void screenPowerOff();
+void screenPowerOn(uint8_t brightness);
 bool isButtonPressed(int buttonPin);
 /** True while the PCF8574 button for this pin is held (no touch nav). */
 bool isPhysicalButtonPressed(int buttonPin);

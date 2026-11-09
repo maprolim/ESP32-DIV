@@ -183,6 +183,10 @@ namespace Deauther {
   void deautherSetup();
   void deautherLoop();
 }
+namespace Deauther2 {
+  void deauther2Setup();
+  void deauther2Loop();
+}
 namespace Tetris {
   // Easter egg launched from inside Settings (AppSettingsUI::loop(), see
   // utils.cpp) via the sequence UP, UP, DOWN, SELECT. tetrisEnter() repaints

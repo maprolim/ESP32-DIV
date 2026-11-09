@@ -2,7 +2,7 @@
 
 // Order matches wifi_items in ESP32-DIV.ino (all 12 WIFI_FEATURE_COUNT
 // entries, spanning both paged-submenu pages -- see WIFI_INFO_COUNT).
-const InfoText wifi_page0_info[12] = {
+const InfoText wifi_page0_info[13] = {
     {"Analyzes network traffic by capturing data packets in the air, allowing you to visualize activity, protocol types, and the volume of information flowing in the environment.",
      "Analisa o trafego da rede capturando pacotes de dados no ar, permitindo visualizar a atividade, os tipos de protocolo e o volume de informacoes trafegadas no ambiente.",
      "Analiza el trafico de la red capturando paquetes de datos en el aire, permitiendo visualizar la actividad, los tipos de protocolo y el volumen de informacion que circula en el entorno."},
@@ -12,9 +12,9 @@ const InfoText wifi_page0_info[12] = {
     {"Disconnects targets from a Wi-Fi network by sending spoofed deauthentication packets, tricking both the router and the device into dropping the connection.",
      "Desconecta alvos de uma rede Wi-Fi enviando pacotes de desautenticacao falsificados, enganando o roteador e o dispositivo para que encerrem a conexao.",
      "Desconecta objetivos de una red Wi-Fi enviando paquetes de desautenticacion falsificados, enganando tanto al router como al dispositivo para que terminen la conexion."},
-    {"Sends thousands of mass network search requests to nearby routers, testing the equipment's stability against overload and denial-of-service attacks.",
-     "Envia milhares de solicitacoes de busca de rede em massa para roteadores proximos, testando a estabilidade dos equipamentos contra ataques de sobrecarga e negacao de servico.",
-     "Envia miles de solicitudes masivas de busqueda de red a routers cercanos, probando la estabilidad de los equipos frente a ataques de sobrecarga y denegacion de servicio."},
+    {"Disconnects targets from every access point that shares the same network name (mesh/roaming), sending deauthentication packets to all matching nodes so the device drops the connection regardless of which node it is associated with.",
+     "Desconecta alvos de todos os pontos de acesso que compartilham o mesmo nome de rede (mesh/roaming), enviando pacotes de desautenticacao para todos os nos correspondentes para que o dispositivo perca a conexao independentemente do no ao qual esta associado.",
+     "Desconecta objetivos de todos los puntos de acceso que comparten el mismo nombre de red (mesh/roaming), enviando paquetes de desautenticacion a todos los nodos coincidentes para que el dispositivo pierda la conexion sin importar al nodo al que este asociado."},
     {"Actively listens to the environment for deauthentication packets, acting as an alarm to indicate if any nearby network is under a disconnection attack.",
      "Escuta ativamente o ambiente em busca de pacotes de desautenticacao, servindo como um alarme para indicar se alguma rede proxima esta sofrendo um ataque de desconexao.",
      "Escucha activamente el entorno en busca de paquetes de desautenticacion, funcionando como una alarma para indicar si alguna red cercana esta sufriendo un ataque de desconexion."},
@@ -39,29 +39,29 @@ const InfoText wifi_page0_info[12] = {
     {"Displays a live bar graph of signal activity across all 2.4GHz channels, helping identify which channels are the most crowded or have the least interference.",
      "Exibe um grafico de barras em tempo real da atividade de sinal em todos os canais de 2.4GHz, ajudando a identificar quais canais estao mais congestionados ou tem menos interferencia.",
      "Muestra un grafico de barras en tiempo real de la actividad de senal en todos los canales de 2.4GHz, ayudando a identificar que canales estan mas congestionados o tienen menos interferencia."},
+    {"Sends thousands of mass network search requests to nearby routers, testing the equipment's stability against overload and denial-of-service attacks.",
+     "Envia milhares de solicitacoes de busca de rede em massa para roteadores proximos, testando a estabilidade dos equipamentos contra ataques de sobrecarga e negacao de servico.",
+     "Envia miles de solicitudes masivas de busqueda de red a routers cercanos, probando la estabilidad de los equipos frente a ataques de sobrecarga y denegacion de servicio."},
 };
 
-// Order matches bluetooth_items in ESP32-DIV.ino (all 9 BT_FEATURE_COUNT
+// Order matches bluetooth_items in ESP32-DIV.ino (all 10 BT_FEATURE_COUNT
 // entries -- see BT_INFO_COUNT).
-const InfoText bluetooth_page0_info[9] = {
+const InfoText bluetooth_page0_info[10] = {
     {"Floods the Bluetooth spectrum attempting to disrupt and block nearby connections.",
      "Inunda o espectro Bluetooth para tentar interromper e bloquear conexoes proximas.",
      "Inunda el espectro Bluetooth intentando interrumpir y bloquear las conexiones cercanas."},
     {"Spoofs Bluetooth device identifications to impersonate other devices.",
      "Falsifica identificacoes de dispositivos Bluetooth para se passar por outros aparelhos.",
      "Falsifica identificaciones de dispositivos Bluetooth para hacerse pasar por otros aparatos."},
-    {"Sends malformed packets aimed at crashing or generating constant pairing notifications on nearby Apple devices.",
-     "Envia pacotes malformados com o objetivo de travar ou gerar notificacoes de pareamento constantes em dispositivos Apple proximos.",
-     "Envia paquetes malformados con el objetivo de bloquear o generar notificaciones de emparejamiento constantes en dispositivos Apple cercanos."},
+    {"Floods nearby Apple devices with Apple Continuity action packets, triggering repeated pairing and setup prompts.",
+     "Inunda os dispositivos Apple proximos com pacotes de acao do Apple Continuity, disparando avisos repetidos de pareamento e configuracao.",
+     "Inunda los dispositivos Apple cercanos con paquetes de accion de Apple Continuity, provocando avisos repetidos de emparejamiento y configuracion."},
     {"Emulates an Apple AirTag signal, creating fake trackers visible to iPhones in the area.",
      "Emula o sinal de um Apple AirTag, criando rastreadores falsos visiveis para iPhones na area.",
      "Emula la senal de un Apple AirTag, creando rastreadores falsos visibles para los iPhones en el area."},
     {"Scans the area to detect, list, and track the presence of legitimate Apple AirTags around you.",
      "Varre a area para detectar, listar e rastrear a presenca de Apple AirTags legitimos ao redor.",
      "Recorre el area para detectar, listar y rastrear la presencia de Apple AirTags legitimos alrededor."},
-    {"Captures raw data packets for monitoring and technical analysis of local traffic.",
-     "Captura pacotes brutos de dados para monitoramento e analise tecnica do trafego local.",
-     "Captura paquetes de datos en bruto para monitoreo y analisis tecnico del trafico local."},
     {"Lists active Bluetooth Low Energy (BLE) devices in the area, displaying MAC addresses and signal strength.",
      "Lista os dispositivos Bluetooth Low Energy (BLE) ativos na area, exibindo enderecos MAC e a intensidade do sinal.",
      "Lista los dispositivos Bluetooth Low Energy (BLE) activos en el area, mostrando direcciones MAC e intensidad de senal."},
@@ -71,6 +71,12 @@ const InfoText bluetooth_page0_info[9] = {
     {"Scans the area for Bluetooth signal patterns typical of hidden card skimmers (e.g. on ATMs or gas pumps), alerting you if a likely skimmer device is detected nearby.",
      "Varre a area em busca de padroes de sinal Bluetooth tipicos de skimmers escondidos (por exemplo em caixas eletronicos ou bombas de combustivel), alertando se um provavel skimmer for detectado por perto.",
      "Recorre el area en busca de patrones de senal Bluetooth tipicos de skimmers ocultos (por ejemplo en cajeros automaticos o surtidores de combustible), alertando si se detecta un probable skimmer cerca."},
+    {"Advanced dual-mode scanner alternating Bluetooth Classic (Inquiry) and BLE, scoring nearby devices with a 3-layer heuristic (MAC vendor, class/name, SPP/UART services) and showing a live RSSI radar to help locate a hidden skimmer physically.",
+     "Scanner avancado de modo duplo que alterna Bluetooth Classico (Inquiry) e BLE, pontuando os dispositivos proximos com uma heuristica de 3 camadas (fabricante do MAC, classe/nome, servicos SPP/UART) e exibindo um radar de RSSI em tempo real para ajudar a localizar fisicamente um skimmer escondido.",
+     "Escaner avanzado de modo dual que alterna Bluetooth Clasico (Inquiry) y BLE, puntuando los dispositivos cercanos con una heuristica de 3 capas (fabricante del MAC, clase/nombre, servicios SPP/UART) y mostrando un radar de RSSI en tiempo real para ayudar a localizar fisicamente un skimmer oculto."},
+    {"Captures raw data packets for monitoring and technical analysis of local traffic.",
+     "Captura pacotes brutos de dados para monitoramento e analise tecnica do trafego local.",
+     "Captura paquetes de datos en bruto para monitoreo y analisis tecnico del trafico local."},
 };
 
 // Order matches nrf_submenu_items in ESP32-DIV.ino, skipping "Back to Main Menu".
@@ -131,13 +137,16 @@ const InfoText tools_info[4] = {
 };
 
 // Order matches rfid_submenu_items in ESP32-DIV.ino, skipping "Back to Main Menu".
-const InfoText rfid_info[8] = {
+const InfoText rfid_info[10] = {
     {"Scans proximity cards or tags to display their open data and Unique Identification (UID) number.",
      "Escaneia cartoes ou tags de aproximacao para exibir seus dados abertos e o numero de identificacao unico (UID).",
      "Escanea tarjetas o tags de proximidad para mostrar sus datos abiertos y el numero de identificacion unico (UID)."},
     {"Copies the extracted data from an original card directly onto a compatible and rewritable blank card.",
      "Copia os dados extraidos de um cartao original diretamente para um cartao virgem compativel e regravavel.",
      "Copia los datos extraidos de una tarjeta original directamente a una tarjeta en blanco compatible y regrabable."},
+    {"Card vault: read cards, name them, keep a list, and emulate the selected one's UID on demand.",
+     "Cofre de cartoes: leia, nomeie, mantenha uma lista e emule o UID do cartao selecionado.",
+     "Boveda de tarjetas: lee, nombra, mantiene una lista y emula el UID de la tarjeta seleccionada."},
     {"Formats and completely erases all data written on a rewritable card or tag.",
      "Formata e apaga completamente todos os dados gravados em um cartao ou tag regravavel.",
      "Formatea y borra por completo todos los datos grabados en una tarjeta o tag regrabable."},
@@ -156,6 +165,9 @@ const InfoText rfid_info[8] = {
     {"Works by emulating a virtual card while simultaneously applying interference techniques against the target reader.",
      "Funciona emulando um cartao virtual e, simultaneamente, aplica tecnicas de interferencia contra o leitor alvo.",
      "Funciona emulando una tarjeta virtual mientras aplica simultaneamente tecnicas de interferencia contra el lector objetivo."},
+    {"Emulates a card's UID so an external reader sees the DIV as the copied card. Works for readers that only read the UID.",
+     "Emula o UID de um cartao para que um leitor externo veja o DIV como o cartao copiado. Funciona com leitores que so leem o UID.",
+     "Emula el UID de una tarjeta para que un lector externo vea el DIV como la tarjeta copiada. Funciona con lectores que solo leen el UID."},
 };
 
 // Order matches gps_submenu_items in ESP32-DIV.ino, skipping "Back to Main Menu".

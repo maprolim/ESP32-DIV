@@ -3996,10 +3996,20 @@ static constexpr float JD_ACTIVITY_DUTY = 0.10f;
 static constexpr uint8_t JD_RING = 20;
 static constexpr int JD_FLOOR_INIT_DBM = -95;
 
-static const uint32_t kFreqHz[] = {433920000UL, 434420000UL, 315000000UL, 868350000UL};
-static const char* kFreqLabel[] = {"433.92", "434.42", "315.00", "868.35"};
+// Same ascending set as Replay Attack / SubGHz jammer. The previous
+ // detector list was a short, out-of-order subset (433.92, 434.42, 315,
+ // 868.35) with no hardware reason to stay limited or unsorted.
+static const uint32_t kFreqHz[] = {
+    300000000UL, 303875000UL, 304250000UL, 310000000UL, 314000000UL, 315000000UL,
+    318000000UL, 390000000UL, 418000000UL, 433075000UL, 433420000UL, 433920000UL,
+    434420000UL, 434775000UL, 438900000UL, 868350000UL, 915000000UL, 925000000UL
+};
 static constexpr uint8_t kFreqCount = sizeof(kFreqHz) / sizeof(kFreqHz[0]);
-static uint8_t freqIdx = 1;
+static uint8_t freqIdx = 11;  // 433.92 MHz — common ISM default
+
+static void jdFormatFreqMHz(char* buf, size_t n, uint8_t idx) {
+  snprintf(buf, n, "%.2f", kFreqHz[idx % kFreqCount] / 1000000.0);
+}
 
 static unsigned int samplingPeriod = 0;
 
@@ -4101,8 +4111,10 @@ static void logEvent(uint32_t whenMs, uint32_t durMs, int peakDbm, int dutyPct) 
     if (!SD.exists(LOG_DIR)) SD.mkdir(LOG_DIR);
     File f = SD.open(LOG_DIR "/jamdet.csv", FILE_APPEND);
     if (f) {
+      char freqLabel[12];
+      jdFormatFreqMHz(freqLabel, sizeof(freqLabel), freqIdx);
       f.printf("%lu,%s,JAM,%d,%lu,%d\n",
-               (unsigned long)whenMs, kFreqLabel[freqIdx], peakDbm,
+               (unsigned long)whenMs, freqLabel, peakDbm,
                (unsigned long)durMs, dutyPct);
       f.close();
     }
@@ -4357,7 +4369,9 @@ static void jdUpdateInfo(int rssiNow, int dutyPct) {
   char buf[28];
 
   if (full || s_disp.freqIdx != freqIdx) {
-    snprintf(buf, sizeof(buf), "%s MHz", kFreqLabel[freqIdx]);
+    char mhz[12];
+    jdFormatFreqMHz(mhz, sizeof(mhz), freqIdx);
+    snprintf(buf, sizeof(buf), "%s MHz", mhz);
     jdDrawValueCell(kJdValueX, kJdInfoRow1Y, kJdCol1ValueW, buf, UI_TEXT);
     s_disp.freqIdx = freqIdx;
   }
