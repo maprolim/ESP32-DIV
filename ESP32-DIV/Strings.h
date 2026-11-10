@@ -187,6 +187,10 @@ enum StrKey : uint16_t {
   // Saved-profile View screen: delete confirmation line (body text, full width)
   STR_PROFILE_DELETE_CONFIRM,
 
+  STR_RFID_EMULATE,
+  STR_RFID_CLONE2,
+  STR_NAV_READ,
+  STR_NAV_LIST,
   STR_KEY_COUNT
 };
 
