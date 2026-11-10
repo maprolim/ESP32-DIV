@@ -2346,13 +2346,19 @@ static void renameSelectedProfile() {
   String path = selectedPath;
   uint16_t local = selectedLocalIdx;
 
-  OnScreenKeyboardConfig cfg;
+  // Value-initialize so every field the keyboard may read is zeroed. In
+  // particular middleLabel must be null when shuffle is off: KeyboardUI draws
+  // it with only a `? :` null-guard, so an uninitialized (garbage, non-null)
+  // pointer there makes drawString read a bad address and the ESP32 resets --
+  // that was the "rename screen opens then reboots" bug.
+  OnScreenKeyboardConfig cfg{};
   cfg.titleLine1      = "[!] Rename profile";
   cfg.titleLine2      = "(max 15 chars, ^ caps, # sym)";
   osKeyboardUseStandardLayout(cfg);
   cfg.maxLen          = MAX_NAME_LENGTH - 1;
   cfg.buttonsY        = 195;
   cfg.backLabel       = "Back";
+  cfg.middleLabel     = nullptr;   // no middle/shuffle button on rename
   cfg.okLabel         = "OK";
   cfg.enableShuffle   = false;
   cfg.requireNonEmpty = true;
