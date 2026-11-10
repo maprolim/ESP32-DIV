@@ -131,13 +131,16 @@ const InfoText tools_info[4] = {
 };
 
 // Order matches rfid_submenu_items in ESP32-DIV.ino, skipping "Back to Main Menu".
-const InfoText rfid_info[8] = {
+const InfoText rfid_info[10] = {
     {"Scans proximity cards or tags to display their open data and Unique Identification (UID) number.",
      "Escaneia cartoes ou tags de aproximacao para exibir seus dados abertos e o numero de identificacao unico (UID).",
      "Escanea tarjetas o tags de proximidad para mostrar sus datos abiertos y el numero de identificacion unico (UID)."},
     {"Copies the extracted data from an original card directly onto a compatible and rewritable blank card.",
      "Copia os dados extraidos de um cartao original diretamente para um cartao virgem compativel e regravavel.",
      "Copia los datos extraidos de una tarjeta original directamente a una tarjeta en blanco compatible y regrabable."},
+    {"Card vault: read cards, name them, keep a list, and emulate the selected one's UID on demand.",
+     "Cofre de cartoes: leia, nomeie, mantenha uma lista e emule o UID do cartao selecionado.",
+     "Boveda de tarjetas: lee, nombra, mantiene una lista y emula el UID de la tarjeta seleccionada."},
     {"Formats and completely erases all data written on a rewritable card or tag.",
      "Formata e apaga completamente todos os dados gravados em um cartao ou tag regravavel.",
      "Formatea y borra por completo todos los datos grabados en una tarjeta o tag regrabable."},
@@ -156,6 +159,9 @@ const InfoText rfid_info[8] = {
     {"Works by emulating a virtual card while simultaneously applying interference techniques against the target reader.",
      "Funciona emulando um cartao virtual e, simultaneamente, aplica tecnicas de interferencia contra o leitor alvo.",
      "Funciona emulando una tarjeta virtual mientras aplica simultaneamente tecnicas de interferencia contra el lector objetivo."},
+    {"Emulates a card's UID so an external reader sees the DIV as the copied card. Works for readers that only read the UID.",
+     "Emula o UID de um cartao para que um leitor externo veja o DIV como o cartao copiado. Funciona com leitores que so leem o UID.",
+     "Emula el UID de una tarjeta para que un lector externo vea el DIV como la tarjeta copiada. Funciona con lectores que solo leen el UID."},
 };
 
 // Order matches gps_submenu_items in ESP32-DIV.ino, skipping "Back to Main Menu".

@@ -165,6 +165,10 @@ const LocStr STRINGS[STR_KEY_COUNT] = {
 
     // Saved-profile View screen delete confirmation (body text)
     {"Press Delete again to confirm", "Aperte Apagar de novo p/ confirmar", "Pulsa Borrar de nuevo p/ confirmar"}, // STR_PROFILE_DELETE_CONFIRM
+    {"Emulate Card", "Emular Cartao", "Emular Tarjeta"},                       // STR_RFID_EMULATE
+    {"Clone Card 2", "Clonar Cartao 2", "Clonar Tarjeta 2"},                   // STR_RFID_CLONE2
+    {"Read", "Ler", "Leer"},                                      // STR_NAV_READ
+    {"List", "Lista", "Lista"},                                    // STR_NAV_LIST
 };
 
 const char* t(StrKey key) {

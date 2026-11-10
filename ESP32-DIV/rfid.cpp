@@ -5,8 +5,12 @@
 #include <Arduino.h>
 #include <cstdio>
 #include <cstring>
+#include <strings.h>
+#include <Preferences.h>
 
 #include "SettingsStore.h"
+#include "crypto1.h"
+#include "KeyboardUI.h"
 #include "Touchscreen.h"
 #include "icon.h"
 #include "utils.h"
@@ -1634,6 +1638,7 @@ static bool rfidTargetWaitReader(const char* tickMsg, unsigned long timeoutMs, u
         const uint8_t maxLen = *rxLen;
         *rxLen = maxLen;
         if (s_nfc.getDataTarget(rx, rxLen)) {
+          Serial.printf("EMUL: leitor respondeu (len=%u)\n", (unsigned)*rxLen);
           return true;
         }
       }
@@ -2125,6 +2130,972 @@ void sessionDisruptEmulate() {
   rfidResultAndDismiss("Disrupt Emulate", "Stopped", "SAM reconfigured.");
 }
 
+/**
+ * Emula o UID de um cartao real (modo target). Le um cartao, guarda o UID e
+ * faz o PN532 responder como ele. Para leitores que so leem o UID.
+ */
+void sessionEmulate() {
+  static const char kIntro[] =
+      "Target mode: emula o UID de um cartao real.\n"
+      "Use apenas em equipamento proprio ou autorizado.\n\n"
+      "1) apresente o cartao a copiar;\n"
+      "2) encoste o DIV no leitor externo;\n"
+      "3) o DIV responde com o UID lido.\n\n"
+      "Stop encerra a sessao.";
+
+  rfidAttachBus();
+  rfidShellProgress("Emular", "Aguardando cartao...", "Cancel", kIntro);
+
+  uint8_t uid[7] = {0};
+  uint8_t uidLength = 0;
+  if (!rfidListenIso14443a("Emular", "Cancelar", uid, &uidLength,
+                           (unsigned long)RFID_CLONE_PHASE_TIMEOUT_MS,
+                           "Apresente o cartao a copiar", kIntro)) {
+    rfidRestoreBus();
+    return;
+  }
+
+  char uidStr[24] = "";
+  uidToHex(uidStr, sizeof(uidStr), uid, uidLength);
+  rfidSetDynamicPill("OK", UI_OK);
+  rfidDynamicBand(0, "Cartao lido", uidStr);
+  rfidPrint(String("[+] Cartao ") + uidStr, UI_OK, false);
+
+  s_nfc.setTargetUid(uid, uidLength);
+
+  rfidShellProgress("Emular", "Aguardando leitor externo...", "Parar",
+                    "Encoste o DIV no leitor. O UID emulado e o do cartao lido.");
+
+  uint8_t rx[64];
+  uint8_t rxLen = sizeof(rx);
+  if (!rfidTargetWaitReader("Aguardando leitor", RFID_TARGET_WAIT_TIMEOUT_MS, rx,
+                            &rxLen, true)) {
+    rfidRestoreBus();
+    return;
+  }
+
+  rfidSetDynamicPill("TX", UI_WARN);
+  rfidDynamicBand(0, "Emulando", uidStr);
+  rfidPrint("[+] Leitor detectado - emulando", UI_OK, false);
+
+  for (;;) {
+    if (rfidPumpSessionUi()) {
+      break;
+    }
+    if (rfidPollCancel()) {
+      break;
+    }
+    rxLen = sizeof(rx);
+    if (s_nfc.getDataTarget(rx, &rxLen)) {
+      // Reenvia o UID como resposta (o PN532 cuida da anticolisao/SELECT).
+      rfidTargetSendResponse(uid, uidLength);
+    }
+    delay(5);
+  }
+
+  s_nfc.SAMConfig();
+  s_nfc.setPassiveActivationRetries(0xFF);
+  rfidRestoreBus();
+  if (rfidSessionExitRequested()) {
+    return;
+  }
+  rfidResultAndDismiss("Emular", "Parado", "Sessao encerrada.");
+}
+
+// ===================== Clone Card 2 (cofre de cartoes) =====================
+
+struct VaultCard {
+  char name[16];
+  uint8_t uid[7];
+  uint8_t uidLen;
+  uint8_t secKey[16][6];    // chave que abriu cada setor
+  uint8_t secSlot[16];      // 0=nada, 1=key A, 2=key B, 3=magic (sem chave)
+  uint8_t data[16][4][16];  // 64 blocos x 16 bytes
+  uint8_t dumpOk;           // 1 = dump completo lido
+};
+
+static constexpr int kMaxVaultCards = 8;
+static VaultCard s_vault[kMaxVaultCards];
+static int s_vaultCount = 0;
+static int s_vaultSel = 0;
+
+/** Insertion sort by name (case-insensitive) so the list is always alphabetical. */
+static void vaultSort() {
+  for (int i = 1; i < s_vaultCount; i++) {
+    VaultCard key = s_vault[i];
+    int j = i - 1;
+    while (j >= 0 && strcasecmp(s_vault[j].name, key.name) > 0) {
+      s_vault[j + 1] = s_vault[j];
+      --j;
+    }
+    s_vault[j + 1] = key;
+  }
+}
+
+static int vaultFindByName(const char* name) {
+  if (!name) return -1;
+  for (int i = 0; i < s_vaultCount; i++) {
+    if (strcasecmp(s_vault[i].name, name) == 0) return i;
+  }
+  return -1;
+}
+
+static void vaultLoad() {
+  Preferences p;
+  if (!p.begin("rfid_vault", true)) {
+    s_vaultCount = 0;
+    s_vaultSel = 0;
+    return;
+  }
+  s_vaultCount = p.getInt("count", 0);
+  if (s_vaultCount < 0) s_vaultCount = 0;
+  if (s_vaultCount > kMaxVaultCards) s_vaultCount = kMaxVaultCards;
+  if (s_vaultCount > 0 && p.getBytesLength("cards") == (size_t)sizeof(s_vault)) {
+    p.getBytes("cards", s_vault, sizeof(s_vault));
+  } else {
+    s_vaultCount = 0;
+  }
+  vaultSort();
+  s_vaultSel = 0;
+  p.end();
+}
+
+static void vaultSave() {
+  Preferences p;
+  if (!p.begin("rfid_vault", false)) return;
+  p.putInt("count", s_vaultCount);
+  p.putBytes("cards", s_vault, sizeof(s_vault));
+  p.end();
+}
+
+/** True if `name` is already used by another saved card (case-insensitive). */
+static bool vaultNameInUse(const char* name, int excludeIdx) {
+  if (!name || !name[0]) return true;
+  for (int i = 0; i < s_vaultCount; i++) {
+    if (i == excludeIdx) continue;
+    if (strcasecmp(s_vault[i].name, name) == 0) return true;
+  }
+  return false;
+}
+
+static void vaultSetNavMain() {
+  setTouchNavLabels(t(STR_NAV_BACK), nullptr, t(STR_NAV_READ), nullptr, t(STR_NAV_LIST));
+}
+
+static void vaultSetNavList() {
+  setTouchNavLabels(t(STR_NAV_BACK), t(STR_NAV_NEXT), t(STR_NAV_SEL), t(STR_NAV_PREV),
+                    t(STR_NAV_VIEW));
+}
+
+static void vaultDrawMain() {
+  rfidShellProgress("Clone Card 2", "Pronto", nullptr,
+                    "SELECIONAR: ler cartao. DIREITO: lista. ESQUERDO: sair.");
+  char buf[40];
+  snprintf(buf, sizeof(buf), "Cartoes: %d", s_vaultCount);
+  rfidDynamicBand(0, "Clone Card 2", buf);
+  rfidPrint("[*] SELECIONAR: ler cartao", UI_TEXT, false);
+  rfidPrint("[*] DIREITO: lista", UI_TEXT, false);
+  if (s_vaultCount > 0) {
+    rfidPrint(String("[+] Selecionado: ") + s_vault[s_vaultSel].name, UI_OK, false);
+  }
+  vaultSetNavMain();
+  rfidRedrawNavChrome();
+}
+
+static void vaultDrawList() {
+  rfidShellProgress("Clone Card 2", "Cartoes", nullptr,
+                    "CIMA/BAIXO: navegar. SELECIONAR: emular. DIREITO: ver. ESQUERDO: voltar.");
+  char buf[40];
+  snprintf(buf, sizeof(buf), "%d cartoes", s_vaultCount);
+  rfidDynamicBand(0, "Lista de cartoes", buf);
+  rfidListenShellReset();
+  if (s_vaultCount == 0) {
+    rfidPrint("Nenhum cartao. Leia um primeiro.", UI_DIM_TEXT, false);
+  } else {
+    for (int i = 0; i < s_vaultCount; i++) {
+      char line[40];
+      snprintf(line, sizeof(line), "%s%s", (i == s_vaultSel) ? "> " : "  ", s_vault[i].name);
+      rfidPrint(line, (i == s_vaultSel) ? UI_OK : UI_TEXT, false);
+    }
+  }
+  vaultSetNavList();
+  rfidRedrawNavChrome();
+}
+
+static void vaultSetNavView() {
+  setTouchNavLabels(t(STR_NAV_BACK), t(STR_NAV_DELETE), nullptr, t(STR_NAV_RENAME), nullptr);
+}
+
+static void vaultDrawView() {
+  VaultCard& c = s_vault[s_vaultSel];
+  int keyed = 0;
+  for (int i = 0; i < 16; i++) {
+    if (c.secSlot[i]) keyed++;
+  }
+  rfidShellProgress("Clone Card 2", "Detalhes", nullptr,
+                    "CIMA: renomear. BAIXO: deletar. ESQUERDO: voltar.");
+  rfidDynamicBand(0, c.name, "ISO14443A");
+  char uidStr[24] = "";
+  uidToHex(uidStr, sizeof(uidStr), c.uid, c.uidLen);
+  rfidPrint(String("[+] UID: ") + uidStr, UI_OK, false);
+  char keyLine[40];
+  snprintf(keyLine, sizeof(keyLine), "[%s] Setores com chave: %d/16",
+           (keyed == 16) ? "+" : "!", keyed);
+  rfidPrint(keyLine, (keyed == 16) ? UI_OK : UI_WARN, false);
+  rfidPrint("[*] CIMA: renomear", UI_TEXT, false);
+  vaultSetNavView();
+  rfidRedrawNavChrome();
+}
+
+static void vaultRename() {
+  if (s_vaultSel < 0 || s_vaultSel >= s_vaultCount) return;
+  OnScreenKeyboardConfig cfg;
+  cfg.titleLine1 = "[!] Renomear cartao";
+  cfg.titleLine2 = "(max 15 chars, nomes unicos)";
+  osKeyboardUseStandardLayout(cfg);
+  cfg.maxLen = 15;
+  cfg.buttonsY = 195;
+  cfg.backLabel = "Back";
+  cfg.okLabel = "OK";
+  cfg.enableShuffle = false;
+  cfg.requireNonEmpty = true;
+  cfg.emptyErrorMsg = "Nome vazio!";
+  for (;;) {
+    setTouchButtonInputEnabled(false);
+    OnScreenKeyboardResult r = showOnScreenKeyboard(cfg, String(s_vault[s_vaultSel].name));
+    setTouchButtonInputEnabled(true);
+    if (!r.accepted || r.text.length() == 0) return;
+    if (vaultNameInUse(r.text.c_str(), s_vaultSel)) {
+      rfidResultAndDismiss("Clone Card 2", "Nome em uso",
+                           "Ja existe outro cartao com esse nome.\nEscolha outro.");
+      continue;
+    }
+    memset(s_vault[s_vaultSel].name, 0, sizeof(s_vault[s_vaultSel].name));
+    strncpy(s_vault[s_vaultSel].name, r.text.c_str(), sizeof(s_vault[s_vaultSel].name) - 1);
+    vaultSort();
+    {
+      const int idx = vaultFindByName(r.text.c_str());
+      if (idx >= 0) s_vaultSel = idx;
+    }
+    vaultSave();
+    return;
+  }
+}
+
+static void vaultDelete() {
+  if (s_vaultSel < 0 || s_vaultSel >= s_vaultCount) return;
+  for (int i = s_vaultSel; i < s_vaultCount - 1; i++) {
+    s_vault[i] = s_vault[i + 1];
+  }
+  s_vaultCount--;
+  if (s_vaultCount > 0) {
+    if (s_vaultSel >= s_vaultCount) s_vaultSel = s_vaultCount - 1;
+  } else {
+    s_vaultSel = 0;
+  }
+  if (s_vaultCount < kMaxVaultCards) {
+    memset(&s_vault[s_vaultCount], 0, sizeof(VaultCard));
+  }
+  vaultSave();
+}
+
+// ---------------- Dicionario de chaves Mifare Classic ----------------
+// As chaves mais usadas no mercado + variantes. Nao existe "todas as chaves"
+// (sao 2^48); isto cobre o que e conhecido/publico.
+static const uint8_t kMfcKeys[][6] = {
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+    {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}, {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7},
+    {0x4D, 0x3A, 0x99, 0xC3, 0x51, 0xDD}, {0x1A, 0x98, 0x2C, 0x7E, 0x45, 0x9A},
+    {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}, {0x71, 0x4C, 0x5C, 0x88, 0x6E, 0x97},
+    {0x58, 0x7C, 0xE5, 0xF1, 0x8E, 0x0F}, {0x7A, 0x2E, 0x3C, 0x8D, 0x4B, 0x5F},
+    {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}, {0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+    {0x11, 0x22, 0x33, 0x44, 0x55, 0x66}, {0x22, 0x22, 0x22, 0x22, 0x22, 0x22},
+    {0x33, 0x33, 0x33, 0x33, 0x33, 0x33}, {0x44, 0x44, 0x44, 0x44, 0x44, 0x44},
+    {0x55, 0x55, 0x55, 0x55, 0x55, 0x55}, {0x66, 0x66, 0x66, 0x66, 0x66, 0x66},
+    {0x77, 0x77, 0x77, 0x77, 0x77, 0x77}, {0x88, 0x88, 0x88, 0x88, 0x88, 0x88},
+    {0x99, 0x99, 0x99, 0x99, 0x99, 0x99}, {0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
+    {0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB}, {0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC},
+    {0xDD, 0xDD, 0xDD, 0xDD, 0xDD, 0xDD}, {0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE},
+    {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5}, {0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5},
+    {0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5}, {0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5},
+    {0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5}, {0xF0, 0xE1, 0xD2, 0xC3, 0xB4, 0xA5},
+    {0xA5, 0xB4, 0xC3, 0xD2, 0xE1, 0xF0}, {0x12, 0x34, 0x56, 0x78, 0x90, 0xAB},
+    {0x00, 0x11, 0x22, 0x33, 0x44, 0x55}, {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB},
+    {0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56}, {0x48, 0x45, 0x4C, 0x4C, 0x4F, 0x21},
+    {0x4D, 0x49, 0x46, 0x41, 0x52, 0x45}, {0x4D, 0x46, 0x43, 0x4C, 0x54, 0x52},
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0xFF}, {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00},
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x01}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x0A},
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE}, {0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF},
+    {0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00}, {0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F},
+    {0x2C, 0x7E, 0x45, 0x9A, 0x1A, 0x98}, {0x4A, 0x3B, 0x2C, 0x1D, 0x0E, 0x0F},
+    {0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F}, {0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F},
+    {0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34}, {0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x01},
+    {0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A}, {0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6},
+};
+
+static constexpr int kMfcKeyCount = (int)(sizeof(kMfcKeys) / sizeof(kMfcKeys[0]));
+
+/** Chaves candidatas derivadas do UID (padroes usados por fabricantes). */
+static int mfcUidCandidates(const uint8_t* uid, uint8_t uidLen, uint8_t out[][6], int maxOut) {
+  uint8_t cand[16][6];
+  int n = 0;
+  if (uidLen >= 6) {
+    memcpy(cand[n++], uid, 6);                        // primeiros 6
+    memcpy(cand[n++], uid + (uidLen - 6), 6);         // ultimos 6
+    for (int i = 0; i < 6; i++) cand[n][i] = uid[uidLen - 1 - i];
+    n++;                                              // invertido
+  }
+  if (uidLen >= 4) {
+    uint8_t buf[6];
+    memset(buf, 0, 6);
+    memcpy(buf, uid, 4);
+    memcpy(cand[n++], buf, 6);                        // u0..u3 00 00
+    memcpy(buf + 4, uid, 2);
+    memcpy(cand[n++], buf, 6);                        // u0..u3 u0 u1
+    memset(buf + 4, 0xFF, 2);
+    memcpy(cand[n++], buf, 6);                        // u0..u3 FF FF
+    memset(buf + 4, 0, 2);
+    memcpy(buf + 4, uid + 2, 2);
+    memcpy(cand[n++], buf, 6);                        // u0..u3 u2 u3
+    uint8_t bcc = 0;
+    for (uint8_t i = 0; i < uidLen; i++) bcc ^= uid[i];
+    memset(buf, 0, 6);
+    memcpy(buf, uid, 4);
+    buf[4] = bcc;
+    memcpy(cand[n++], buf, 6);                        // u0..u3 bcc 00
+  }
+  int m = 0;
+  for (int i = 0; i < n && m < maxOut; i++) {
+    bool dup = false;
+    for (int j = 0; j < m; j++) {
+      if (memcmp(cand[j], cand[i], 6) == 0) { dup = true; break; }
+    }
+    if (!dup) { memcpy(out[m], cand[i], 6); m++; }
+  }
+  return m;
+}
+
+/** Le os 4 blocos de um setor JA autenticado (sem re-listar). Retorna 0..4. */
+static int mfcReadBlocks(uint8_t s, uint8_t data[4][16]) {
+  int ok = 0;
+  for (uint8_t b = 0; b < 4; b++) {
+    bool got = false;
+    for (int r = 0; r < 3 && !got; r++) {
+      if (s_nfc.mifareclassic_ReadDataBlock((uint8_t)(s * 4 + b), data[b])) {
+        got = true;
+      } else {
+        delay(4);
+      }
+    }
+    if (!got) break;
+    ok++;
+    delay(4);
+  }
+  return ok;
+}
+
+/** Le um setor inteiro com retentativas (auth + 4 blocos). Robustez de RF. */
+static bool mfcReadSector(uint8_t* uid, uint8_t uidLen, uint8_t s, uint8_t key[6], uint8_t* slotIo,
+                          uint8_t data[4][16]) {
+  const uint8_t blk0 = (uint8_t)(s * 4);
+  const uint8_t first = (*slotIo == 1) ? 0 : 1;
+  for (int t = 0; t < 2; t++) {
+    const uint8_t keyNum = (t == 0) ? first : (uint8_t)(1 - first);
+    const bool authOk = s_nfc.mifareclassic_AuthenticateBlock(uid, uidLen, blk0, keyNum, key);
+    if (!authOk) {
+      Serial.printf("DUMP: s%u auth slot%u falhou\n", (unsigned)s, (unsigned)keyNum);
+      // re-seleciona o cartao antes da proxima tentativa (padrao do mfoc)
+      uint8_t u2[7] = {0};
+      uint8_t ul2 = 0;
+      s_nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, u2, &ul2, 60);
+      continue;
+    }
+    Serial.printf("DUMP: s%u auth slot%u ok\n", (unsigned)s, (unsigned)keyNum);
+    bool ok = true;
+    for (uint8_t b = 0; b < 4; b++) {
+      bool got = false;
+      for (int r = 0; r < 3 && !got; r++) {
+        if (s_nfc.mifareclassic_ReadDataBlock((uint8_t)(s * 4 + b), data[b])) {
+          got = true;
+        } else {
+          delay(6);
+        }
+      }
+      if (!got) {
+        ok = false;
+        break;
+      }
+      delay(5);
+    }
+    if (ok) {
+      *slotIo = (keyNum == 0) ? 1 : 2;
+      return true;
+    }
+    // leitura falhou: re-seleciona antes de tentar o outro slot
+    uint8_t u2[7] = {0};
+    uint8_t ul2 = 0;
+    s_nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, u2, &ul2, 60);
+    Serial.printf("DUMP: s%u leitura falhou no reparo -> re-selecionado\n", (unsigned)s);
+  }
+  return false;
+}
+
+static bool vaultRead() {
+  uint8_t uid[7] = {0};
+  uint8_t uidLen = 0;
+  rfidAttachBus();
+  if (!rfidListenIso14443a("Ler cartao", "Cancelar", uid, &uidLen,
+                           (unsigned long)RFID_CLONE_PHASE_TIMEOUT_MS,
+                           "Apresente o cartao", "Encoste o cartao que sera copiado.")) {
+    return false;
+  }
+  if (s_vaultCount >= kMaxVaultCards) {
+    rfidResultAndDismiss("Clone Card 2", "Cheio", "Limite de cartoes do cofre atingido.");
+    return false;
+  }
+
+  // ------- 1) DUMP PRIMEIRO (o cartao ainda esta na bobina) -------
+  VaultCard& c = s_vault[s_vaultCount];
+  memset(&c, 0, sizeof(c));
+  memcpy(c.uid, uid, uidLen);
+  c.uidLen = uidLen;
+
+  bool dumpOk = true;
+  int keyed = 0;
+  rfidShellProgress("Ler cartao", "Mantenha o cartao", "Cancelar", nullptr);
+  rfidSetFeatureInfo("Ler cartao", "");
+  rfidSetListenNavLabels("Cancelar", false);
+  {
+    char u[24] = "";
+    uidToHex(u, sizeof(u), uid, uidLen);
+    Serial.printf("DUMP: inicio UID %s (%u bytes)\n", u, (unsigned)uidLen);
+  }
+
+  for (int attempt = 0; attempt < 2; attempt++) {
+    keyed = 0;
+    dumpOk = true;
+    memset(c.secKey, 0, sizeof(c.secKey));
+    memset(c.secSlot, 0, sizeof(c.secSlot));
+    memset(c.data, 0, sizeof(c.data));
+
+    // O cartao tem de estar na bobina antes de comecar.
+    bool cancelled = false;
+    for (;;) {
+      if (rfidPumpSessionUi() || rfidPollCancel()) {
+        cancelled = true;
+        break;
+      }
+      if (rfidTagStillPresent(uid, uidLen)) break;
+      rfidDynamicBand(0, "Aproxime o cartao", "Mantenha na bobina");
+      delay(200);
+    }
+    if (cancelled) return false;
+
+    // 1.1) Tag "magic" Gen1a: o backdoor 0x40/0x43 libera leitura sem chave.
+    const bool magic = tryMagicBackdoor();
+    Serial.printf("DUMP: magic backdoor = %d\n", (int)magic);
+    if (magic) {
+      for (uint8_t s = 0; s < 16; s++) {
+        c.secSlot[s] = 3;
+        for (uint8_t b = 0; b < 4; b++) {
+          if (!s_nfc.mifareclassic_ReadDataBlock((uint8_t)(s * 4 + b), c.data[s][b])) {
+            dumpOk = false;
+          }
+          delay(2);
+        }
+        keyed++;
+      }
+      Serial.printf("DUMP: magic liberou %d setores\n", keyed);
+    } else {
+      // 1.2) Dicionario + candidatas do UID, slots A e B, setor a setor.
+      uint8_t uidCand[16][6];
+      uint16_t gotMask = 0;
+      const int uidCandCount = mfcUidCandidates(uid, uidLen, uidCand, 16);
+      const int totalCand = kMfcKeyCount + uidCandCount;
+      int candIdx = 0;
+      for (; candIdx < totalCand && keyed < 16; candIdx++) {
+        if (rfidPumpSessionUi() || rfidPollCancel()) {
+          dumpOk = false;
+          break;
+        }
+        const uint8_t* k =
+            (candIdx < kMfcKeyCount) ? kMfcKeys[candIdx] : uidCand[candIdx - kMfcKeyCount];
+        char l1[40];
+        char l2[40];
+        snprintf(l1, sizeof(l1), "Chave %d/%d", candIdx + 1, totalCand);
+        snprintf(l2, sizeof(l2), "Setores %d/16", keyed);
+        rfidDynamicBand(0, l1, l2);
+        for (uint8_t s = 0; s < 16; s++) {
+          if (c.secSlot[s]) continue;
+          const uint8_t blk = (uint8_t)(s * 4);
+          uint8_t slot = 0;
+          if (s_nfc.mifareclassic_AuthenticateBlock(uid, uidLen, blk, 0, (uint8_t*)k)) {
+            slot = 1;
+          } else if (s_nfc.mifareclassic_AuthenticateBlock(uid, uidLen, blk, 1, (uint8_t*)k)) {
+            slot = 2;
+          }
+          if (!slot) continue;
+          memcpy(c.secKey[s], k, 6);
+          c.secSlot[s] = slot;
+          keyed++;
+          // Le imediatamente: sem re-listar o cartao e sem delay antes do 1o bloco.
+          const int nread = mfcReadBlocks(s, c.data[s]);
+          if (nread == 4) {
+            gotMask |= (uint16_t)(1u << s);
+          } else {
+            // Leitura falhou (NAK): re-seleciona o cartao, como o mfoc faz apos
+            // qualquer erro, para nao envenenar as autenticacoes seguintes.
+            uint8_t u2[7] = {0};
+            uint8_t ul2 = 0;
+            s_nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, u2, &ul2, 60);
+            Serial.printf("DUMP: s%u leitura falhou -> cartao re-selecionado\n", (unsigned)s);
+          }
+          Serial.printf("DUMP: setor %u key %c = %02X%02X%02X%02X%02X%02X lidos=%d\n",
+                        (unsigned)s, (slot == 2) ? 'B' : 'A', k[0], k[1], k[2], k[3], k[4], k[5],
+                        nread);
+        }
+      }
+      Serial.printf("DUMP: chaves %d/16 (testadas %d)\n", keyed, candIdx);
+
+      // Nada abriu: so ai vale re-listar para saber se o cartao esta na bobina.
+      if (keyed == 0) {
+        const bool presentNow = rfidTagStillPresent(uid, uidLen);
+        Serial.printf("DUMP: 0 chaves, cartao presente=%d\n", (int)presentNow);
+        if (!presentNow) {
+          rfidDynamicBand(0, "Cartao saiu", "Aproxime e repita");
+          rfidPrint("[!] Cartao saiu da bobina. Repetindo...", UI_WARN, false);
+          delay(600);
+          continue;
+        }
+      }
+
+      // Reparo: setores com chave mas sem os 4 blocos.
+      bool stopped = false;
+      for (int pass = 0; pass < 3; pass++) {
+        int missing = 0;
+        for (uint8_t s = 0; s < 16; s++) {
+          if (!c.secSlot[s] || (gotMask & (uint16_t)(1u << s))) continue;
+          missing++;
+          if (rfidPumpSessionUi() || rfidPollCancel()) {
+            stopped = true;
+            break;
+          }
+          char l2[40];
+          snprintf(l2, sizeof(l2), "Setor %u (passada %d)", (unsigned)s, pass + 1);
+          rfidDynamicBand(0, "Lendo cartao", l2);
+          if (mfcReadSector(uid, uidLen, s, c.secKey[s], &c.secSlot[s], c.data[s])) {
+            gotMask |= (uint16_t)(1u << s);
+          } else {
+            Serial.printf("DUMP: s%u falhou (passada %d)\n", (unsigned)s, pass + 1);
+          }
+        }
+        int done = 0;
+        for (uint8_t s = 0; s < 16; s++) {
+          if (gotMask & (uint16_t)(1u << s)) done++;
+        }
+        Serial.printf("DUMP: passada %d -> %d/16 lidos\n", pass + 1, done);
+        if (stopped || missing == 0 || done >= 16) break;
+      }
+      dumpOk = ((gotMask == 0xFFFFu) && !stopped);
+      for (uint8_t s = 0; s < 16; s++) {
+        if (!c.secSlot[s]) {
+          Serial.printf("DUMP: setor %u sem chave\n", (unsigned)s);
+        } else if (!(gotMask & (uint16_t)(1u << s))) {
+          Serial.printf("DUMP: setor %u com chave, sem leitura\n", (unsigned)s);
+        }
+      }
+    }
+    break;
+  }
+  c.dumpOk = dumpOk ? 1 : 0;
+
+  // ------- 2) Nome automatico (o teclado aqui reiniciava o DIV) -------
+  Serial.printf("DUMP: heap depois do dump = %u\n", (unsigned)ESP.getFreeHeap());
+  char newName[16];
+  memset(newName, 0, sizeof(newName));
+  for (int i = 1; i <= 99; i++) {
+    snprintf(newName, sizeof(newName), "Cartao %d", i);
+    if (vaultFindByName(newName) < 0) break;
+  }
+  strncpy(c.name, newName, sizeof(c.name) - 1);
+  s_vaultCount++;
+  vaultSort();
+  {
+    const int idx = vaultFindByName(newName);
+    s_vaultSel = (idx >= 0) ? idx : (s_vaultCount - 1);
+  }
+  vaultSave();
+  Serial.printf("DUMP: salvo '%s' dumpOk=%d keyed=%d\n", newName, (int)dumpOk, keyed);
+
+  char msg[220];
+  if (dumpOk) {
+    snprintf(msg, sizeof(msg), "%s\n%d/16 setores lidos.\nRenomeie em Lista > View > CIMA.",
+             newName, keyed);
+    rfidResultAndDismiss("Ler cartao", "Cartao salvo", msg);
+  } else {
+    snprintf(msg, sizeof(msg), "%s\n%d/16 setores com chave.\nOs outros usam chave propria.",
+             newName, keyed);
+    rfidResultAndDismiss("Ler cartao", "Dump parcial", msg);
+  }
+  return true;
+}
+
+static void vaultInfo() {
+  if (s_vaultSel < 0 || s_vaultSel >= s_vaultCount) return;
+  VaultCard& c = s_vault[s_vaultSel];
+  char uidStr[24] = "";
+  uidToHex(uidStr, sizeof(uidStr), c.uid, c.uidLen);
+  char body[128];
+  snprintf(body, sizeof(body), "UID: %s\nTipo: ISO14443A\n\nEmula o UID no modo target.", uidStr);
+  rfidResultAndDismiss("Cartao", c.name, body);
+}
+
+// ================= Emulacao completa do Mifare Classic (fase 2) =================
+
+/** Inicia o estado Crypto1 do cartao: key + (nt XOR uid4). */
+static void mfcTagAuthBegin(const uint8_t key[6], uint32_t uid4, uint32_t nt, Crypto1State* st) {
+  uint64_t k = 0;
+  for (int i = 0; i < 6; i++) k = (k << 8) | key[i];
+  crypto1_create(st, k);
+  crypto1_word(st, nt ^ uid4, 0);
+}
+
+/** Processa o desafio {nr}{ar} (8 bytes). Preenche at[4] se o ar confere. */
+static bool mfcTagAuthChallenge(Crypto1State* st, uint32_t nt, const uint8_t enc8[8],
+                                uint8_t at[4]) {
+  for (int i = 0; i < 4; i++) {
+    (void)crypto1_byte(st, enc8[i], 1);  // decodifica {nr} (so sincroniza o estado)
+  }
+  uint8_t ar[4];
+  for (int i = 0; i < 4; i++) {
+    ar[i] = (uint8_t)(crypto1_byte(st, enc8[4 + i], 1) ^ enc8[4 + i]);
+  }
+  // ar esperado = suc(nt): suc32 + 4x suc8
+  uint32_t expect = crypto1_prng_successor(nt, 32);
+  for (int i = 0; i < 4; i++) {
+    expect = crypto1_prng_successor(expect, 8);
+    if (ar[i] != (uint8_t)(expect & 0xff)) return false;
+  }
+  // at = suc96(nt); {at} = ks3 ^ at (estado alimenta 0, como o leitor)
+  const uint32_t atPlain = crypto1_prng_successor(expect, 32);
+  const uint32_t ks3 = crypto1_word(st, 0, 0);
+  const uint32_t atEnc = ks3 ^ atPlain;
+  for (int i = 0; i < 4; i++) at[i] = (uint8_t)(atEnc >> (8 * (3 - i)));
+  return true;
+}
+
+static uint8_t mfcCryptByte(Crypto1State* st, uint8_t b, bool enc) {
+  return enc ? (uint8_t)(crypto1_byte(st, b, 0) ^ b) : (uint8_t)(crypto1_byte(st, b, 1) ^ b);
+}
+
+static uint16_t rfidIso14443Crc(const uint8_t* data, uint8_t n) {
+  uint16_t crc = 0x6363;
+  for (uint8_t i = 0; i < n; i++) {
+    crc ^= data[i];
+    for (int b = 0; b < 8; b++) {
+      crc = (crc & 1) ? (uint16_t)((crc >> 1) ^ 0x8408) : (uint16_t)(crc >> 1);
+    }
+  }
+  return crc;
+}
+
+static void vaultEmulate() {
+  if (s_vaultSel < 0 || s_vaultSel >= s_vaultCount) return;
+  VaultCard& c = s_vault[s_vaultSel];
+  char uidStr[24] = "";
+  uidToHex(uidStr, sizeof(uidStr), c.uid, c.uidLen);
+  rfidAttachBus();
+  s_nfc.setTargetUid(c.uid, c.uidLen);
+
+  const bool full = (c.dumpOk != 0) && (c.uidLen >= 4);
+  Serial.printf("EMUL: UID=%s dumpOk=%d emulacao=%s\n", uidStr, (int)c.dumpOk,
+                full ? "COMPLETA" : "so UID");
+  rfidShellProgress("Emular", "Aguardando leitor...", "Parar", nullptr);
+  rfidSetFeatureInfo("Emular", "");
+  rfidSetListenNavLabels("Parar", false);
+
+  const uint32_t uid4 = ((uint32_t)c.uid[0] << 24) | ((uint32_t)c.uid[1] << 16) |
+                        ((uint32_t)c.uid[2] << 8) | c.uid[3];
+  const uint32_t nt = 0x6E746371u;  // nonce fixo ("ntcq")
+  Crypto1State st;
+  bool authed = false;
+  bool armed = s_nfc.AsTarget();
+  Serial.printf("EMUL: AsTarget=%d\n", (int)armed);
+
+  uint8_t rx[64];
+  uint8_t rxLen = sizeof(rx);
+  uint8_t lastRx0 = 0xFF;
+  uint32_t lastRxLogMs = 0;
+
+  for (;;) {
+    if (rfidPumpSessionUi()) break;
+    if (rfidPollCancel()) break;
+    rxLen = sizeof(rx);
+    if (!s_nfc.getDataTarget(rx, &rxLen)) {
+      delay(5);
+      continue;
+    }
+    if (rxLen == 0) continue;
+
+    // Log com limite de taxa: so quando o comando muda ou a cada 1,5 s.
+    if (rx[0] != lastRx0 || (uint32_t)(millis() - lastRxLogMs) > 1500UL) {
+      lastRx0 = rx[0];
+      lastRxLogMs = millis();
+      Serial.printf("EMUL RX(%u):", (unsigned)rxLen);
+      for (uint8_t i = 0; i < rxLen && i < 24; i++) Serial.printf(" %02X", rx[i]);
+      Serial.println();
+    }
+
+    if (!full) {
+      rfidTargetSendResponse(c.uid, c.uidLen);
+      continue;
+    }
+
+    if (!authed) {
+      if (rx[0] == 0x60 || rx[0] == 0x61) {
+        const uint8_t blk = rx[1];
+        const uint8_t sec = blk / 4;
+        uint8_t key[6];
+        if (sec < 16 && c.secSlot[sec]) memcpy(key, c.secKey[sec], 6);
+        else memset(key, 0xFF, 6);
+        Serial.printf("EMUL: AUTH cmd=%02X blk=%u sec=%u slot=%u\n", (unsigned)rx[0],
+                      (unsigned)blk, (unsigned)sec, (unsigned)c.secSlot[sec]);
+        mfcTagAuthBegin(key, uid4, nt, &st);
+        uint8_t ntBuf[4] = {(uint8_t)(nt >> 24), (uint8_t)(nt >> 16), (uint8_t)(nt >> 8),
+                            (uint8_t)nt};
+        rfidTargetSendResponse(ntBuf, 4);
+
+        // espera o desafio {nr}{ar} (8 bytes)
+        bool got = false;
+        const unsigned long t0 = millis();
+        while (millis() - t0 < 900UL) {
+          if (rfidPumpSessionUi() || rfidPollCancel()) break;
+          rxLen = sizeof(rx);
+          if (s_nfc.getDataTarget(rx, &rxLen)) {
+            Serial.printf("EMUL: desafio(%u):", (unsigned)rxLen);
+            for (uint8_t i = 0; i < rxLen && i < 8; i++) Serial.printf(" %02X", rx[i]);
+            Serial.println();
+            if (rxLen >= 8) {
+              got = true;
+              break;
+            }
+          }
+        }
+        if (!got) {
+          Serial.println("EMUL: desafio nao chegou (rearmando)");
+          s_nfc.AsTarget();
+          continue;
+        }
+        uint8_t at[4];
+        if (mfcTagAuthChallenge(&st, nt, rx, at)) {
+          rfidTargetSendResponse(at, 4);
+          authed = true;
+          Serial.println("EMUL: AUTENTICADO, at enviado");
+          rfidDynamicBand(0, "Emulando", "Autenticado");
+        } else {
+          Serial.println("EMUL: ar invalido (chave errada?) — rearmando");
+          s_nfc.AsTarget();
+        }
+      } else if (rxLen == 1 && (rx[0] == 0x26 || rx[0] == 0x25 || rx[0] == 0x52 ||
+                                rx[0] == 0x51 || rx[0] == 0x53)) {
+        // REQA/WUPA: o DIV responde a anticolisao ele mesmo.
+        const uint8_t atqa[2] = {0x04, 0x00};
+        rfidTargetSendResponse(atqa, 2);
+        Serial.println("EMUL: REQA -> ATQA 0400");
+      } else if (rx[0] == 0x93 && rxLen >= 2 && rx[1] == 0x20) {
+        // SELECT CL1 (cascade 1): responde UID(4) + BCC
+        uint8_t sel[5];
+        memcpy(sel, c.uid, 4);
+        sel[4] = (uint8_t)(0x88 ^ c.uid[0] ^ c.uid[1] ^ c.uid[2]);
+        rfidTargetSendResponse(sel, 5);
+        Serial.println("EMUL: SELECT CL1 -> UID+BCC");
+      } else if (rx[0] == 0x93 && rxLen >= 8 && rx[1] == 0x70) {
+        // SELECT CL1 completo: responde SAK + CRC
+        const uint8_t sak = 0x08;
+        const uint16_t crc = rfidIso14443Crc(&sak, 1);
+        const uint8_t resp[3] = {sak, (uint8_t)(crc & 0xff), (uint8_t)(crc >> 8)};
+        rfidTargetSendResponse(resp, 3);
+        Serial.println("EMUL: SELECT completo -> SAK 08 + CRC");
+      } else if (rx[0] == 0x50 && rxLen >= 2) {
+        Serial.println("EMUL: HALT (pre-auth)");
+      } else {
+        Serial.printf("EMUL: frame pre-auth nao tratado (%02X)\n", (unsigned)rx[0]);
+      }
+    } else {
+      // Comandos cifrados: decifra byte a byte.
+      const uint8_t plain0 = mfcCryptByte(&st, rx[0], false);
+      if (plain0 == 0x30 && rxLen >= 2) {  // READ
+        const uint8_t blk = mfcCryptByte(&st, rx[1], false);
+        // consome os 2 bytes de CRC (do frame ou calculados) p/ manter sincronia
+        const uint8_t crcIn[2] = {plain0, blk};
+        const uint16_t crc = rfidIso14443Crc(crcIn, 2);
+        if (rxLen >= 4) {
+          (void)mfcCryptByte(&st, rx[2], false);
+          (void)mfcCryptByte(&st, rx[3], false);
+        } else {
+          (void)mfcCryptByte(&st, (uint8_t)(crc & 0xff), false);
+          (void)mfcCryptByte(&st, (uint8_t)(crc >> 8), false);
+        }
+        const uint8_t sec = (blk / 4) & 0x0F;
+        Serial.printf("EMUL: READ blk=%u sec=%u\n", (unsigned)blk, (unsigned)sec);
+        uint8_t* d = c.data[sec][blk % 4];
+        uint8_t out[16];
+        for (int i = 0; i < 16; i++) out[i] = mfcCryptByte(&st, d[i], true);
+        rfidTargetSendResponse(out, 16);
+      } else if (plain0 == 0x50 || plain0 == 0x52) {  // HALT
+        (void)mfcCryptByte(&st, rx[1], false);
+        if (rxLen >= 4) {
+          (void)mfcCryptByte(&st, rx[2], false);
+          (void)mfcCryptByte(&st, rx[3], false);
+        }
+        Serial.println("EMUL: HALT (rearmando)");
+        authed = false;
+        s_nfc.AsTarget();
+      } else if (plain0 == 0xA0) {  // WRITE: responde ACK de 4 bits (0x0A)
+        Serial.println("EMUL: WRITE — responde ACK");
+        const uint8_t ack = 0x0A;
+        rfidTargetSendResponse(&ack, 1);
+      } else {
+        Serial.printf("EMUL: cmd %02X nao tratado (rearmando)\n", (unsigned)plain0);
+        authed = false;
+        s_nfc.AsTarget();
+      }
+    }
+    delay(2);
+  }
+
+  s_nfc.SAMConfig();
+  s_nfc.setPassiveActivationRetries(0xFF);
+  rfidRestoreBus();
+  if (rfidSessionExitRequested()) return;
+  rfidResultAndDismiss("Emular", "Parado", "Sessao encerrada.");
+}
+
+void sessionClone2() {
+  vaultLoad();
+  s_rfidUiDrawn = false;
+  int page = 0;  // 0=main, 1=list, 2=view
+
+  vaultSetNavMain();
+  vaultDrawMain();
+  rfidRedrawNavChrome();
+
+  for (;;) {
+    if (rfidPumpSessionUi()) break;
+
+    const bool left = isButtonPressed(BTN_LEFT);
+    const bool select = isButtonPressed(BTN_SELECT);
+    const bool right = isButtonPressed(BTN_RIGHT);
+    const bool up = isButtonPressed(BTN_UP);
+    const bool down = isButtonPressed(BTN_DOWN);
+
+    if (left) {
+      rfidReleaseNavButtons();
+      if (page == 2) {
+        page = 1;
+        vaultSetNavList();
+        vaultDrawList();
+        rfidRedrawNavChrome();
+      } else if (page == 1) {
+        page = 0;
+        vaultSetNavMain();
+        vaultDrawMain();
+        rfidRedrawNavChrome();
+      } else {
+        break;
+      }
+      continue;
+    }
+
+    if (page == 0) {
+      if (select) {
+        rfidReleaseNavButtons();
+        if (vaultRead()) {
+          page = 1;
+          vaultSetNavList();
+          vaultDrawList();
+          rfidRedrawNavChrome();
+        } else {
+          vaultDrawMain();
+          rfidRedrawNavChrome();
+        }
+        continue;
+      }
+      if (right) {
+        rfidReleaseNavButtons();
+        page = 1;
+        vaultSetNavList();
+        vaultDrawList();
+        rfidRedrawNavChrome();
+        continue;
+      }
+    } else if (page == 1) {
+      if (up) {
+        rfidReleaseNavButtons();
+        if (s_vaultCount > 0) {
+          s_vaultSel = (s_vaultSel - 1 + s_vaultCount) % s_vaultCount;
+          vaultDrawList();
+        }
+        continue;
+      }
+      if (down) {
+        rfidReleaseNavButtons();
+        if (s_vaultCount > 0) {
+          s_vaultSel = (s_vaultSel + 1) % s_vaultCount;
+          vaultDrawList();
+        }
+        continue;
+      }
+      if (right) {
+        rfidReleaseNavButtons();
+        if (s_vaultCount > 0) {
+          page = 2;
+          vaultSetNavView();
+          vaultDrawView();
+          rfidRedrawNavChrome();
+        }
+        continue;
+      }
+      if (select) {
+        rfidReleaseNavButtons();
+        vaultEmulate();
+        vaultDrawList();
+        rfidRedrawNavChrome();
+        continue;
+      }
+    } else {
+      if (up) {
+        rfidReleaseNavButtons();
+        vaultRename();
+        vaultDrawView();
+        rfidRedrawNavChrome();
+        continue;
+      }
+      if (down) {
+        rfidReleaseNavButtons();
+        if (rfidRunTwoBoxConfirm("Clone Card 2", "Apagar cartao?",
+                                 s_vault[s_vaultSel].name,
+                                 "O cartao sera removido da lista.",
+                                 "Confirma a exclusao deste cartao?", "Apagar")) {
+          vaultDelete();
+          page = 1;
+          vaultSetNavList();
+          vaultDrawList();
+          rfidRedrawNavChrome();
+        } else {
+          vaultDrawView();
+          rfidRedrawNavChrome();
+        }
+        continue;
+      }
+    }
+    delay(10);
+  }
+
+  setTouchNavLabels(nullptr, nullptr, nullptr, nullptr, nullptr);
+  rfidRestoreBus();
+}
+
 void sessionCardReader() {
   static const char kIntro[] =
       "Passive ISO14443A read.\n\n"
@@ -2419,6 +3390,9 @@ void sessionClone() {
         if (s_nfc.mifareclassic_WriteDataBlock(0, block0Data)) {
           blocksDone++;
           uidWritten = true;
+          // BUGFIX: o UID do cartão mudou para o do source. A autenticação dos
+          // setores seguintes precisa usar o UID NOVO, senão tudo falha.
+          memcpy(uid, srcUidCopy, uidLength);
         } else {
           cloneOk = false;
         }
@@ -2461,8 +3435,10 @@ void sessionClone() {
         if (!auth) {
           auth = s_nfc.mifareclassic_AuthenticateBlock(uid, uidLength, blockNum, 0, keyZero);
         }
+        bool wr = false;
         if (auth) {
-          if (s_nfc.mifareclassic_WriteDataBlock(blockNum, s_srcData[sector][block])) {
+          wr = s_nfc.mifareclassic_WriteDataBlock(blockNum, s_srcData[sector][block]);
+          if (wr) {
             blocksDone++;
           } else {
             cloneOk = false;
@@ -2470,6 +3446,8 @@ void sessionClone() {
         } else {
           cloneOk = false;
         }
+        Serial.printf("CLONE s%u b%u auth=%d wr=%d\n", (unsigned)sector,
+                      (unsigned)blockNum, (int)auth, (int)wr);
         delay(28);
       }
     }
